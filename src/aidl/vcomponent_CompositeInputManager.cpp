@@ -296,7 +296,7 @@ void CompositeInputManager::handleQueuedUtMessage(
     // `compositeinput.params.port` (defaulting to 0), forward the instance via
     // CompositeInputPort::handleUTControlPlaneMessage(), then destroy the
     // instance. Not required by the L1 suite; lands with the real
-    // implementation (see TEVDevice/impl/README.md).
+    // implementation (see vDevice/impl/README.md).
 }
 
 int CompositeInputManager::publishAndJoinThreadPool()

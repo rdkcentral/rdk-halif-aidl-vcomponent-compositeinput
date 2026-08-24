@@ -47,7 +47,7 @@
  * -------------------
  * The production parser (ut-core / ut-control KVP based) is intentionally kept
  * out of this skeleton and will live in a separate implementation folder. See
- * TEVDevice/impl/README.md. When that lands, only the three functions below need
+ * vDevice/impl/README.md. When that lands, only the three functions below need
  * to forward to it; no caller changes are required.
  */
 
