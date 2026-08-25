@@ -35,6 +35,7 @@
 
 #include <com/rdk/hal/compositeinput/PortProperty.h>
 #include <com/rdk/hal/compositeinput/PropertyMetadata.h>
+#include <com/rdk/hal/compositeinput/SignalStatus.h>
 
 #include <optional>
 #include <string>
@@ -75,6 +76,19 @@ std::string trim(const std::string& input);
 bool portPropertyFromString(
     const std::string& token,
     ::com::rdk::hal::compositeinput::PortProperty* outValue);
+
+// PUBLIC_INTERFACE
+/**
+ * @brief Convert a UT `SignalStatus` token to its AIDL enum value.
+ *
+ * @param[in]  token     Enum identifier from UT (for example `STABLE`).
+ * @param[out] outValue  Receives the mapped AIDL enum value on success.
+ *
+ * @return True when the token is a known SignalStatus identifier.
+ */
+bool signalStatusFromString(
+    const std::string& token,
+    ::com::rdk::hal::compositeinput::SignalStatus* outValue);
 
 // PUBLIC_INTERFACE
 /**

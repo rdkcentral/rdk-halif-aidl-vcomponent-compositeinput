@@ -21,15 +21,11 @@
 
 /**
  * @file vcomponent_CompositeInputParseConfig.h
- * @brief Public entrypoints for loading CompositeInput configuration from HFP YAML.
+ * @brief Public entrypoints for validated CompositeInput HFP configuration loading.
  *
- * This module mirrors the structure used by the other vcomponent parsers: create
- * a KVP instance with vcomponent_CompositeInput_kvpCreateInstance(), walk profile
- * keys, then release the instance with vcomponent_CompositeInput_kvpDestroyInstance().
- *
- * The parser entrypoint is component-named so service/controller integration
- * follows the vcomponent_CompositeInput_* convention instead of a generic load*
- * helper.
+ * The parser creates a ut-core KVP instance, opens the caller-provided YAML
+ * profile, reads the `compositeinput` root, and destroys the instance on every
+ * return path. It does not provide a built-in or file-independent fallback.
  */
 
 #include "utility/vcomponent_CompositeInputHfpConfigUtils.h"
@@ -43,9 +39,9 @@ namespace vcomponent::compositeinput::utility
 /**
  * @brief Create and open a ut-core/KVP instance for a YAML configuration file.
  *
- * @param[in] fileName  YAML file path. Must not be nullptr.
+ * @param[in] fileName YAML file path. Must not be null or empty.
  *
- * @return Opaque KVP instance on success, nullptr on failure.
+ * @return Opaque KVP instance on success, or null when creation/opening fails.
  */
 void* vcomponent_CompositeInput_kvpCreateInstance(char* fileName);
 
@@ -53,35 +49,29 @@ void* vcomponent_CompositeInput_kvpCreateInstance(char* fileName);
 /**
  * @brief Destroy a KVP instance created by vcomponent_CompositeInput_kvpCreateInstance().
  *
- * @param[in] instance  Opaque KVP instance. A nullptr value is ignored.
+ * @param[in] instance Opaque KVP instance. A null value is ignored.
  */
 void vcomponent_CompositeInput_kvpDestroyInstance(void* instance);
 
 // PUBLIC_INTERFACE
 /**
- * @brief Parse CompositeInput HFP YAML into CompositeInputHfpConfig.
+ * @brief Parse and validate CompositeInput HFP YAML.
  *
- * The parser reads the `compositeinput` profile from the supplied YAML file
- * using ut-core/ut-control KVP APIs. Field names intentionally match the YAML
- * names, and the internal flow follows the component parser convention: create
- * KVP instance, parse list/profile sections with prefixed keys, then destroy the
- * KVP instance.
+ * Required profile data includes the `compositeinput` root and interface
+ * version; a nonempty port list; nonnegative unique port IDs; complete port
+ * identity and property declarations; and complete platform capabilities. Every
+ * declared property and metadata type must map to the supported AIDL vocabulary,
+ * and property metadata must remain in the matching supported-property order.
  *
- * Expected YAML keys:
- *  - ports[] : { id, name, description }
- *  - maximumConcurrentStartedPorts
+ * On any failure, this function clears @p compositeInputConfiguration, destroys
+ * the temporary KVP instance, and records the failing key or validation rule in
+ * @p outError when supplied.
  *
- * Validation rules to enforce once implemented:
- *  - Each port requires id, name and description
- *  - Port IDs must be unique
- *  - At least one port must exist
- *  - maximumConcurrentStartedPorts >= 1
+ * @param[in] configurationFile YAML file path. Must not be null or empty.
+ * @param[out] compositeInputConfiguration Output configuration populated only on success.
+ * @param[out] outError Optional key-specific error string.
  *
- * @param[in]  configurationFile           YAML file path. Must not be nullptr.
- * @param[out] compositeInputConfiguration Output config populated on success.
- * @param[out] outError                    Optional error string populated on failure.
- *
- * @return true on success, false on error.
+ * @return True when the complete profile is valid; false otherwise.
  */
 bool vcomponent_CompositeInput_parseConfig(
     char* configurationFile,
@@ -90,18 +80,14 @@ bool vcomponent_CompositeInput_parseConfig(
 
 // PUBLIC_INTERFACE
 /**
- * @brief Compatibility wrapper around vcomponent_CompositeInput_parseConfig().
+ * @brief Parse a CompositeInput HFP profile from an immutable path string.
  *
- * This is the entrypoint used by CompositeInputUtController; it forwards to
- * vcomponent_CompositeInput_parseConfig() once the parser is implemented.
- * Returning false makes the manager fall back to its built-in deterministic
- * profile.
+ * @param[in] path YAML file path.
+ * @param[out] outConfig Output configuration. Must not be null.
+ * @param[out] outError Optional key-specific error string.
  *
- * @param[in]  path      YAML file path.
- * @param[out] outConfig Output config. Must not be nullptr.
- * @param[out] outError  Optional error string populated on failure.
- *
- * @return true on success, false on error.
+ * @return True when the complete profile is valid; false otherwise. On failure,
+ *         @p outConfig is cleared and no fallback profile is substituted.
  */
 bool loadCompositeInputHfpConfigFromYaml(
     const std::string& path,

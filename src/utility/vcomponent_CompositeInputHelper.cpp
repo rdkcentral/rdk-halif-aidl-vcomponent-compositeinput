@@ -37,6 +37,7 @@ namespace
 {
 using ::com::rdk::hal::compositeinput::PortProperty;
 using ::com::rdk::hal::compositeinput::PropertyMetadata;
+using ::com::rdk::hal::compositeinput::SignalStatus;
 
 /**
  * @brief Table entry pairing an HFP token with a PortProperty enum value.
@@ -56,6 +57,15 @@ struct PropertyTypeToken
     PropertyMetadata::PropertyType value;
 };
 
+/**
+ * @brief Table entry pairing a UT token with a SignalStatus enum value.
+ */
+struct SignalStatusToken
+{
+    const char* token;
+    SignalStatus value;
+};
+
 // Keys and slot semantics follow com.rdk.hal.compositeinput.PortProperty.
 constexpr PortPropertyToken kPortPropertyTokens[] = {
     {"SIGNAL_STRENGTH", PortProperty::SIGNAL_STRENGTH},
@@ -66,6 +76,13 @@ constexpr PortPropertyToken kPortPropertyTokens[] = {
     {"METRIC_SIGNAL_LOCK_COUNT", PortProperty::METRIC_SIGNAL_LOCK_COUNT},
     {"METRIC_LAST_SIGNAL_LOCK_TIME", PortProperty::METRIC_LAST_SIGNAL_LOCK_TIME},
     {"METRIC_LAST_RESET_TIMESTAMP", PortProperty::METRIC_LAST_RESET_TIMESTAMP},
+};
+
+constexpr SignalStatusToken kSignalStatusTokens[] = {
+    {"NO_SIGNAL", SignalStatus::NO_SIGNAL},
+    {"UNSTABLE", SignalStatus::UNSTABLE},
+    {"NOT_SUPPORTED", SignalStatus::NOT_SUPPORTED},
+    {"STABLE", SignalStatus::STABLE},
 };
 
 constexpr PropertyTypeToken kPropertyTypeTokens[] = {
@@ -121,6 +138,28 @@ bool portPropertyFromString(
 
     const std::string normalized = trim(token);
     for (const auto& entry : kPortPropertyTokens)
+    {
+        if (normalized == entry.token)
+        {
+            *outValue = entry.value;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool signalStatusFromString(
+    const std::string& token,
+    ::com::rdk::hal::compositeinput::SignalStatus* outValue)
+{
+    if (outValue == nullptr)
+    {
+        return false;
+    }
+
+    const std::string normalized = trim(token);
+    for (const auto& entry : kSignalStatusTokens)
     {
         if (normalized == entry.token)
         {
