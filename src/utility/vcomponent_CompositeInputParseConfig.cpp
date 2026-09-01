@@ -19,41 +19,22 @@
 
 /**
  * @file vcomponent_CompositeInputParseConfig.cpp
- * @brief SKELETON implementation of the CompositeInput HFP configuration source.
- *
- * This file intentionally contains NO YAML/KVP parsing back-end. Instead of
- * failing (which left the manager with empty capabilities and made every
- * VTS_L1_COMPOSITEINPUT case fail), the skeleton returns a built-in,
- * deterministic profile that mirrors
- * vcomponent_configurations/hfp-compositeinput.yaml.
- *
- * Why the defaults are file-independent
- * -------------------------------------
- * On target the service is launched from a working directory where the relative
- * HFP path may not resolve (observed in the VTS run logs). A skeleton whose
- * behaviour depends on locating that file is therefore non-deterministic. The
- * skeleton deliberately ignores @p configurationFile and always reports the same
- * profile so the Binder surface is stable everywhere.
- *
- * Values below are the contract asserted by VTS_L1_COMPOSITEINPUT:
- *   - 2 ports (ids 0 and 1)              -> getPortIds_pos / getPort_pos
- *   - halVersion "1.0.0"                 -> getPlatformCapabilities_pos
- *   - maxPorts 2
- *   - maximumConcurrentStartedPorts 1
- *   - 8 supportedProperties
- *   - 8 propertyMetadata entries
- *
- * Real implementation
- * -------------------
- * The production parser (ut-core / ut-control KVP based) is intentionally kept
- * out of this skeleton and will live in a separate implementation folder. See
- * vDevice/impl/README.md. When that lands, only the three functions below need
- * to forward to it; no caller changes are required.
+ * @brief Validated KVP-backed parser for the CompositeInput HFP profile.
  */
 
 #include "utility/vcomponent_CompositeInputParseConfig.h"
 
+#include "common/logger.h"
+#include "utility/vcomponent_CompositeInputHelper.h"
+
+#include <ut_kvp_profile.h>
+
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace vcomponent::compositeinput::utility
@@ -62,156 +43,567 @@ namespace vcomponent::compositeinput::utility
 namespace
 {
 
+constexpr const char* kCompositeInputRoot = "compositeinput";
+constexpr const char* kInterfaceVersionKey = "compositeinput.interfaceVersion";
+constexpr const char* kPortsKey = "compositeinput.ports";
+constexpr const char* kPlatformCapabilitiesKey = "compositeinput.platformCapabilities";
+constexpr size_t kKvpBufferSize = UT_KVP_MAX_ELEMENT_SIZE;
+
 /**
- * @brief Build the 8 property tokens declared by the reference HFP.
+ * @brief Set an optional parser error message.
  *
- * Order matches hfp-compositeinput.yaml so indices line up with the metadata
- * list, as required by the PlatformCapabilities AIDL documentation.
- *
- * @return Supported property tokens in HFP declaration order.
+ * @param[out] outError Optional caller-owned error output.
+ * @param[in] message Error detail identifying the failing HFP key.
  */
-std::vector<std::string> buildSupportedProperties()
+void setError(std::string* outError, const std::string& message)
 {
-    return {
-        "SIGNAL_STRENGTH",
-        "SIGNAL_QUALITY",
-        "METRIC_SIGNAL_LOCK_TIME",
-        "METRIC_SIGNAL_DROPS",
-        "METRIC_UPTIME",
-        "METRIC_SIGNAL_LOCK_COUNT",
-        "METRIC_LAST_SIGNAL_LOCK_TIME",
-        "METRIC_LAST_RESET_TIMESTAMP",
-    };
+    if (outError != nullptr)
+    {
+        *outError = message;
+    }
 }
 
 /**
- * @brief Build one metadata entry.
+ * @brief Report whether a KVP key is present.
  *
- * @param[in] key         PortProperty token.
- * @param[in] type        PropertyMetadata::PropertyType token.
- * @param[in] isMetric    Whether the property is a telemetry metric.
- * @param[in] description Human readable description.
+ * @param[in] instance Open KVP profile instance.
+ * @param[in] key Fully-qualified HFP key.
  *
- * @return Populated metadata configuration entry.
+ * @return True when the key exists.
  */
-CompositeInputPropertyMetadataConfig makeMetadata(
+bool fieldPresent(ut_kvp_instance_t* instance, const std::string& key)
+{
+    return instance != nullptr && ut_kvp_fieldPresent(instance, key.c_str());
+}
+
+/**
+ * @brief Parse a decimal or base-prefixed integer into int32_t.
+ *
+ * @param[in] value Serialized KVP value.
+ * @param[out] outValue Parsed integer.
+ *
+ * @return True when the complete value is representable as int32_t.
+ */
+bool parseInt32(const std::string& value, int32_t* outValue)
+{
+    if (outValue == nullptr || value.empty())
+    {
+        return false;
+    }
+
+    errno = 0;
+    char* endPtr = nullptr;
+    const long parsed = std::strtol(value.c_str(), &endPtr, 0);
+    if (errno != 0 || endPtr == value.c_str() || (endPtr != nullptr && *endPtr != '\0') ||
+        parsed < std::numeric_limits<int32_t>::min() ||
+        parsed > std::numeric_limits<int32_t>::max())
+    {
+        return false;
+    }
+
+    *outValue = static_cast<int32_t>(parsed);
+    return true;
+}
+
+/**
+ * @brief Parse a serialized KVP boolean.
+ *
+ * @param[in] value Serialized KVP value.
+ * @param[out] outValue Parsed boolean.
+ *
+ * @return True when the value is an accepted boolean representation.
+ */
+bool parseBool(const std::string& value, bool* outValue)
+{
+    if (outValue == nullptr)
+    {
+        return false;
+    }
+
+    if (value == "true" || value == "True" || value == "TRUE" || value == "1")
+    {
+        *outValue = true;
+        return true;
+    }
+
+    if (value == "false" || value == "False" || value == "FALSE" || value == "0")
+    {
+        *outValue = false;
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * @brief Read a string field, enforcing presence when requested.
+ *
+ * @param[in] instance Open KVP profile instance.
+ * @param[in] key Fully-qualified HFP key.
+ * @param[out] outValue Parsed output.
+ * @param[out] outError Optional parser error output.
+ * @param[in] required Whether a missing field is an error.
+ *
+ * @return True on a successful read or an allowed absent optional field.
+ */
+bool readStringField(
+    ut_kvp_instance_t* instance,
     const std::string& key,
-    const std::string& type,
-    bool isMetric,
-    const std::string& description)
+    std::string* outValue,
+    std::string* outError,
+    bool required)
 {
-    CompositeInputPropertyMetadataConfig metadata{};
-    metadata.key = key;
-    metadata.type = type;
-    // Every property in the reference HFP is read-only.
-    metadata.readOnly = true;
-    metadata.isMetric = isMetric;
-    metadata.description = description;
-    return metadata;
+    if (outValue == nullptr)
+    {
+        setError(outError, "internal parser error: null string output for key " + key);
+        return false;
+    }
+
+    if (!fieldPresent(instance, key))
+    {
+        if (required)
+        {
+            setError(outError, "required CompositeInput HFP field is missing: " + key);
+            return false;
+        }
+        return true;
+    }
+
+    char buffer[kKvpBufferSize] = {0};
+    const ut_kvp_status_t status =
+        ut_kvp_getStringField(instance, key.c_str(), buffer, sizeof(buffer));
+    if (status != UT_KVP_STATUS_SUCCESS)
+    {
+        setError(outError, "failed to read CompositeInput HFP string field: " + key);
+        return false;
+    }
+
+    *outValue = buffer;
+    if (required && outValue->empty())
+    {
+        setError(outError, "required CompositeInput HFP field is empty: " + key);
+        return false;
+    }
+
+    return true;
 }
 
 /**
- * @brief Build the 8 metadata entries declared by the reference HFP.
+ * @brief Read a required or optional integer HFP field.
  *
- * @return Property metadata in HFP declaration order.
+ * @param[in] instance Open KVP profile instance.
+ * @param[in] key Fully-qualified HFP key.
+ * @param[out] outValue Parsed output.
+ * @param[out] outError Optional parser error output.
+ * @param[in] required Whether a missing field is an error.
+ *
+ * @return True on a valid integer or an allowed absent optional field.
  */
-std::vector<CompositeInputPropertyMetadataConfig> buildPropertyMetadata()
+bool readInt32Field(
+    ut_kvp_instance_t* instance,
+    const std::string& key,
+    int32_t* outValue,
+    std::string* outError,
+    bool required)
 {
-    return {
-        makeMetadata("SIGNAL_STRENGTH", "LONG", false, "Signal strength in dBm"),
-        makeMetadata("SIGNAL_QUALITY",
-                     "INTEGER",
-                     false,
-                     "Aggregated signal quality percentage (0..100)"),
-        makeMetadata("METRIC_SIGNAL_LOCK_TIME",
-                     "LONG",
-                     true,
-                     "Average signal lock time in milliseconds"),
-        makeMetadata("METRIC_SIGNAL_DROPS",
-                     "LONG",
-                     true,
-                     "Total signal drops since last reset"),
-        makeMetadata("METRIC_UPTIME", "LONG", true, "Total uptime in milliseconds"),
-        makeMetadata("METRIC_SIGNAL_LOCK_COUNT",
-                     "LONG",
-                     true,
-                     "Successful signal lock acquisitions since last reset"),
-        makeMetadata("METRIC_LAST_SIGNAL_LOCK_TIME",
-                     "LONG",
-                     true,
-                     "Most recent signal lock acquisition time in milliseconds"),
-        makeMetadata("METRIC_LAST_RESET_TIMESTAMP",
-                     "LONG",
-                     true,
-                     "Wall-clock metric reset timestamp in milliseconds"),
-    };
+    std::string value;
+    if (!readStringField(instance, key, &value, outError, required))
+    {
+        return false;
+    }
+
+    if (value.empty() && !required)
+    {
+        return true;
+    }
+
+    if (!parseInt32(value, outValue))
+    {
+        setError(outError,
+                 "failed to parse CompositeInput HFP integer field: " + key + " value=" + value);
+        return false;
+    }
+
+    return true;
 }
 
 /**
- * @brief Build one port entry with the reference property surface.
+ * @brief Read a required or optional boolean HFP field.
  *
- * @param[in] id          AIDL port identifier.
- * @param[in] name        Port display name.
- * @param[in] description Port description.
+ * @param[in] instance Open KVP profile instance.
+ * @param[in] key Fully-qualified HFP key.
+ * @param[out] outValue Parsed output.
+ * @param[out] outError Optional parser error output.
+ * @param[in] required Whether a missing field is an error.
  *
- * @return Populated port configuration.
+ * @return True on a valid boolean or an allowed absent optional field.
  */
-CompositeInputPortConfig makePort(
-    int32_t id,
-    const std::string& name,
-    const std::string& description)
+bool readBoolField(
+    ut_kvp_instance_t* instance,
+    const std::string& key,
+    bool* outValue,
+    std::string* outError,
+    bool required)
 {
-    CompositeInputPortConfig port{};
-    port.id = id;
-    port.name = name;
-    port.description = description;
-    port.supportedProperties = buildSupportedProperties();
-    port.propertyMetadata = buildPropertyMetadata();
-    return port;
+    std::string value;
+    if (!readStringField(instance, key, &value, outError, required))
+    {
+        return false;
+    }
+
+    if (value.empty() && !required)
+    {
+        return true;
+    }
+
+    if (!parseBool(value, outValue))
+    {
+        setError(outError,
+                 "failed to parse CompositeInput HFP boolean field: " + key + " value=" + value);
+        return false;
+    }
+
+    return true;
 }
 
 /**
- * @brief Build the complete built-in skeleton profile.
+ * @brief Read a string list from a KVP profile.
  *
- * @return Deterministic CompositeInput configuration.
+ * @param[in] instance Open KVP profile instance.
+ * @param[in] key Fully-qualified HFP list key.
+ * @param[out] outValues Parsed list.
+ * @param[out] outError Optional parser error output.
+ * @param[in] required Whether the list must exist.
+ *
+ * @return True on success.
  */
-CompositeInputHfpConfig buildDefaultConfig()
+bool readStringList(
+    ut_kvp_instance_t* instance,
+    const std::string& key,
+    std::vector<std::string>* outValues,
+    std::string* outError,
+    bool required)
 {
-    CompositeInputHfpConfig config{};
+    if (outValues == nullptr)
+    {
+        setError(outError, "internal parser error: null string-list output for key " + key);
+        return false;
+    }
 
-    config.interfaceVersion = "0.2.0.0";
+    outValues->clear();
+    if (!fieldPresent(instance, key))
+    {
+        if (required)
+        {
+            setError(outError, "required CompositeInput HFP list is missing: " + key);
+            return false;
+        }
+        return true;
+    }
 
-    config.ports.push_back(
-        makePort(0, "Front Panel Composite", "Front panel composite video input"));
-    config.ports.push_back(
-        makePort(1, "Rear Composite", "Rear panel composite video input"));
+    const uint32_t count = ut_kvp_getListCount(instance, key.c_str());
+    outValues->reserve(count);
 
-    config.halVersion = "1.0.0";
-    config.maxPorts = 2;
-    config.maximumConcurrentStartedPorts = 1;
-    config.supportedProperties = buildSupportedProperties();
-    config.propertyMetadata = buildPropertyMetadata();
-    config.features.macrovisionDetectionSupported = false;
+    for (uint32_t index = 0; index < count; ++index)
+    {
+        std::string value;
+        const std::string itemKey = key + "." + std::to_string(index);
+        if (!readStringField(instance, itemKey, &value, outError, true))
+        {
+            return false;
+        }
 
-    return config;
+        outValues->push_back(value);
+    }
+
+    return true;
+}
+
+/**
+ * @brief Validate tokens and enforce property-metadata declaration order.
+ *
+ * @param[in] properties Supported-property token list.
+ * @param[in] metadata Property metadata entries.
+ * @param[in] keyPrefix HFP key prefix used in validation errors.
+ * @param[out] outError Optional parser error output.
+ *
+ * @return True when all tokens map to supported AIDL enums and metadata aligns.
+ */
+bool validateProperties(
+    const std::vector<std::string>& properties,
+    const std::vector<CompositeInputPropertyMetadataConfig>& metadata,
+    const std::string& keyPrefix,
+    std::string* outError)
+{
+    std::unordered_set<std::string> propertyTokens;
+    propertyTokens.reserve(properties.size());
+
+    for (size_t index = 0; index < properties.size(); ++index)
+    {
+        ::com::rdk::hal::compositeinput::PortProperty property{};
+        if (!portPropertyFromString(properties[index], &property))
+        {
+            setError(outError,
+                     "unsupported CompositeInput PortProperty token at " + keyPrefix +
+                         ".supportedProperties." + std::to_string(index) + ": " + properties[index]);
+            return false;
+        }
+
+        if (!propertyTokens.insert(properties[index]).second)
+        {
+            setError(outError,
+                     "duplicate CompositeInput PortProperty token at " + keyPrefix +
+                         ".supportedProperties." + std::to_string(index) + ": " + properties[index]);
+            return false;
+        }
+    }
+
+    if (metadata.size() != properties.size())
+    {
+        setError(outError,
+                 "CompositeInput propertyMetadata count must match supportedProperties at " +
+                     keyPrefix);
+        return false;
+    }
+
+    for (size_t index = 0; index < metadata.size(); ++index)
+    {
+        const auto& entry = metadata[index];
+        ::com::rdk::hal::compositeinput::PortProperty property{};
+        if (!portPropertyFromString(entry.key, &property))
+        {
+            setError(outError,
+                     "unsupported CompositeInput propertyMetadata key at " + keyPrefix +
+                         ".propertyMetadata." + std::to_string(index) + ".key: " + entry.key);
+            return false;
+        }
+
+        ::com::rdk::hal::compositeinput::PropertyMetadata::PropertyType type{};
+        if (!propertyTypeFromString(entry.type, &type))
+        {
+            setError(outError,
+                     "unsupported CompositeInput propertyMetadata type at " + keyPrefix +
+                         ".propertyMetadata." + std::to_string(index) + ".type: " + entry.type);
+            return false;
+        }
+
+        if (entry.key != properties[index])
+        {
+            setError(outError,
+                     "CompositeInput propertyMetadata ordering does not match supportedProperties at " +
+                         keyPrefix + ".propertyMetadata." + std::to_string(index));
+            return false;
+        }
+
+        if (entry.description.empty())
+        {
+            setError(outError,
+                     "required CompositeInput HFP field is empty: " + keyPrefix +
+                         ".propertyMetadata." + std::to_string(index) + ".description");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * @brief Read a property-metadata list.
+ *
+ * @param[in] instance Open KVP profile instance.
+ * @param[in] key Fully-qualified HFP list key.
+ * @param[out] outValues Parsed metadata entries.
+ * @param[out] outError Optional parser error output.
+ *
+ * @return True on success.
+ */
+bool readPropertyMetadata(
+    ut_kvp_instance_t* instance,
+    const std::string& key,
+    std::vector<CompositeInputPropertyMetadataConfig>* outValues,
+    std::string* outError)
+{
+    if (outValues == nullptr)
+    {
+        setError(outError, "internal parser error: null metadata output for key " + key);
+        return false;
+    }
+
+    outValues->clear();
+    if (!fieldPresent(instance, key))
+    {
+        setError(outError, "required CompositeInput HFP list is missing: " + key);
+        return false;
+    }
+
+    const uint32_t count = ut_kvp_getListCount(instance, key.c_str());
+    outValues->reserve(count);
+
+    for (uint32_t index = 0; index < count; ++index)
+    {
+        const std::string prefix = key + "." + std::to_string(index) + ".";
+        CompositeInputPropertyMetadataConfig entry{};
+
+        if (!readStringField(instance, prefix + "key", &entry.key, outError, true) ||
+            !readStringField(instance, prefix + "type", &entry.type, outError, true) ||
+            !readBoolField(instance, prefix + "readOnly", &entry.readOnly, outError, true) ||
+            !readBoolField(instance, prefix + "isMetric", &entry.isMetric, outError, true) ||
+            !readStringField(instance, prefix + "description", &entry.description, outError, true))
+        {
+            return false;
+        }
+
+        outValues->push_back(std::move(entry));
+    }
+
+    return true;
+}
+
+/**
+ * @brief Read and validate one port configuration.
+ *
+ * @param[in] instance Open KVP profile instance.
+ * @param[in] index Port list index.
+ * @param[out] outPort Parsed port configuration.
+ * @param[out] outError Optional parser error output.
+ *
+ * @return True when the port is complete and valid.
+ */
+bool readPort(
+    ut_kvp_instance_t* instance,
+    uint32_t index,
+    CompositeInputPortConfig* outPort,
+    std::string* outError)
+{
+    if (outPort == nullptr)
+    {
+        setError(outError, "internal parser error: null port output");
+        return false;
+    }
+
+    *outPort = CompositeInputPortConfig{};
+    const std::string prefix = std::string(kPortsKey) + "." + std::to_string(index) + ".";
+
+    if (!readInt32Field(instance, prefix + "id", &outPort->id, outError, true) ||
+        !readStringField(instance, prefix + "name", &outPort->name, outError, true) ||
+        !readStringField(instance, prefix + "description", &outPort->description, outError, true) ||
+        !readStringList(
+            instance, prefix + "supportedProperties", &outPort->supportedProperties, outError, true) ||
+        !readPropertyMetadata(
+            instance, prefix + "propertyMetadata", &outPort->propertyMetadata, outError))
+    {
+        return false;
+    }
+
+    if (outPort->id < 0)
+    {
+        setError(outError, "CompositeInput port ID must be nonnegative: " + prefix + "id");
+        return false;
+    }
+
+    return validateProperties(
+        outPort->supportedProperties, outPort->propertyMetadata, prefix.substr(0, prefix.size() - 1), outError);
+}
+
+/**
+ * @brief Read and validate platform-wide capabilities.
+ *
+ * @param[in] instance Open KVP profile instance.
+ * @param[out] outConfig Parsed profile configuration.
+ * @param[out] outError Optional parser error output.
+ *
+ * @return True when platform capabilities are complete and valid.
+ */
+bool readPlatformCapabilities(
+    ut_kvp_instance_t* instance,
+    CompositeInputHfpConfig* outConfig,
+    std::string* outError)
+{
+    if (outConfig == nullptr)
+    {
+        setError(outError, "internal parser error: null configuration output");
+        return false;
+    }
+
+    if (!fieldPresent(instance, kPlatformCapabilitiesKey))
+    {
+        setError(outError,
+                 "required CompositeInput HFP profile is missing: compositeinput.platformCapabilities");
+        return false;
+    }
+
+    const std::string prefix = std::string(kPlatformCapabilitiesKey) + ".";
+    if (!readStringField(instance, prefix + "halVersion", &outConfig->halVersion, outError, true) ||
+        !readInt32Field(instance, prefix + "maxPorts", &outConfig->maxPorts, outError, true) ||
+        !readInt32Field(instance,
+                            prefix + "maximumConcurrentStartedPorts",
+                            &outConfig->maximumConcurrentStartedPorts,
+                            outError,
+                            true) ||
+        !readStringList(
+            instance, prefix + "supportedProperties", &outConfig->supportedProperties, outError, true) ||
+        !readPropertyMetadata(
+            instance, prefix + "propertyMetadata", &outConfig->propertyMetadata, outError) ||
+        !readBoolField(instance,
+                           prefix + "features.macrovisionDetectionSupported",
+                           &outConfig->features.macrovisionDetectionSupported,
+                           outError,
+                           true))
+    {
+        return false;
+    }
+
+    if (outConfig->maxPorts < 1)
+    {
+        setError(outError, "CompositeInput maxPorts must be at least one: " + prefix + "maxPorts");
+        return false;
+    }
+
+    if (outConfig->maximumConcurrentStartedPorts < 1)
+    {
+        setError(outError,
+                 "CompositeInput maximumConcurrentStartedPorts must be at least one: " +
+                     prefix + "maximumConcurrentStartedPorts");
+        return false;
+    }
+
+    return validateProperties(
+        outConfig->supportedProperties,
+        outConfig->propertyMetadata,
+        prefix.substr(0, prefix.size() - 1),
+        outError);
 }
 
 } // namespace
 
 void* vcomponent_CompositeInput_kvpCreateInstance(char* fileName)
 {
-    // TODO(impl): create a KVP instance and open `fileName` once the real parser
-    // lands in the separate implementation folder. The skeleton has no parsing
-    // back-end, so no instance is ever produced.
-    (void)fileName;
-    return nullptr;
+    if (fileName == nullptr || std::strlen(fileName) == 0)
+    {
+        return nullptr;
+    }
+
+    ut_kvp_instance_t* instance = ut_kvp_createInstance();
+    if (instance == nullptr)
+    {
+        return nullptr;
+    }
+
+    if (ut_kvp_open(instance, fileName) != UT_KVP_STATUS_SUCCESS)
+    {
+        ut_kvp_destroyInstance(instance);
+        return nullptr;
+    }
+
+    return static_cast<void*>(instance);
 }
 
 void vcomponent_CompositeInput_kvpDestroyInstance(void* instance)
 {
-    // TODO(impl): destroy the KVP instance created above (ignore nullptr).
-    // No-op while the skeleton has no parsing back-end.
-    (void)instance;
+    if (instance != nullptr)
+    {
+        ut_kvp_destroyInstance(static_cast<ut_kvp_instance_t*>(instance));
+    }
 }
 
 bool vcomponent_CompositeInput_parseConfig(
@@ -219,18 +611,92 @@ bool vcomponent_CompositeInput_parseConfig(
     CompositeInputHfpConfig& compositeInputConfiguration,
     std::string* outError)
 {
-    // TODO(impl): read `configurationFile` with the ut-core KVP APIs and honour
-    // the documented validation rules. The skeleton ignores the path on purpose
-    // (see the file header) and reports the built-in profile instead.
-    (void)configurationFile;
-
-    compositeInputConfiguration = buildDefaultConfig();
-
+    compositeInputConfiguration = CompositeInputHfpConfig{};
     if (outError != nullptr)
     {
         outError->clear();
     }
 
+    if (configurationFile == nullptr || std::strlen(configurationFile) == 0)
+    {
+        setError(outError, "CompositeInput HFP YAML path is empty");
+        return false;
+    }
+
+    auto* instance = static_cast<ut_kvp_instance_t*>(
+        vcomponent_CompositeInput_kvpCreateInstance(configurationFile));
+    if (instance == nullptr)
+    {
+        setError(outError,
+                 std::string("failed to open CompositeInput HFP YAML: ") + configurationFile);
+        return false;
+    }
+
+    CompositeInputHfpConfig parsedConfig{};
+    bool success = fieldPresent(instance, kCompositeInputRoot);
+    if (!success)
+    {
+        setError(outError, "missing top-level CompositeInput HFP profile: compositeinput");
+    }
+
+    if (success)
+    {
+        success = readStringField(
+            instance, kInterfaceVersionKey, &parsedConfig.interfaceVersion, outError, true);
+    }
+
+    if (success && !fieldPresent(instance, kPortsKey))
+    {
+        setError(outError, "required CompositeInput HFP list is missing: compositeinput.ports");
+        success = false;
+    }
+
+    if (success)
+    {
+        const uint32_t portCount = ut_kvp_getListCount(instance, kPortsKey);
+        if (portCount == 0)
+        {
+            setError(outError, "CompositeInput HFP must declare at least one port: compositeinput.ports");
+            success = false;
+        }
+
+        std::unordered_set<int32_t> portIds;
+        parsedConfig.ports.reserve(portCount);
+        for (uint32_t index = 0; success && index < portCount; ++index)
+        {
+            CompositeInputPortConfig port{};
+            success = readPort(instance, index, &port, outError);
+            if (success && !portIds.insert(port.id).second)
+            {
+                setError(outError,
+                         "duplicate CompositeInput port ID at compositeinput.ports." +
+                             std::to_string(index) + ".id: " + std::to_string(port.id));
+                success = false;
+            }
+
+            if (success)
+            {
+                parsedConfig.ports.push_back(std::move(port));
+            }
+        }
+    }
+
+    if (success)
+    {
+        success = readPlatformCapabilities(instance, &parsedConfig, outError);
+    }
+
+    vcomponent_CompositeInput_kvpDestroyInstance(instance);
+
+    if (!success)
+    {
+        compositeInputConfiguration = CompositeInputHfpConfig{};
+        return false;
+    }
+
+    compositeInputConfiguration = std::move(parsedConfig);
+    LOGF_INFO("CompositeInput HFP parsing completed successfully. path=%s",
+              configurationFile);
     return true;
 }
 
@@ -241,15 +707,10 @@ bool loadCompositeInputHfpConfigFromYaml(
 {
     if (outConfig == nullptr)
     {
-        if (outError != nullptr)
-        {
-            *outError = "outConfig is null";
-        }
+        setError(outError, "outConfig is null");
         return false;
     }
 
-    // vcomponent_CompositeInput_parseConfig() takes char* to match the ut-core
-    // KVP API; use a mutable copy rather than casting away constness.
     std::string mutablePath = path;
     return vcomponent_CompositeInput_parseConfig(mutablePath.data(), *outConfig, outError);
 }
