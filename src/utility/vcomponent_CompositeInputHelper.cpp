@@ -38,6 +38,9 @@ namespace
 using ::com::rdk::hal::compositeinput::PortProperty;
 using ::com::rdk::hal::compositeinput::PropertyMetadata;
 using ::com::rdk::hal::compositeinput::SignalStatus;
+using ::com::rdk::hal::compositeinput::VideoResolution;
+
+constexpr const char* kLogPrefix = "[VDEVICE_COMPOSITEINPUT]<CompositeInputHelper>";
 
 /**
  * @brief Table entry pairing an HFP token with a PortProperty enum value.
@@ -66,6 +69,15 @@ struct SignalStatusToken
     SignalStatus value;
 };
 
+/**
+ * @brief Table entry pairing a UT command token with its dispatch value.
+ */
+struct UtCommandToken
+{
+    const char* token;
+    UtCommand value;
+};
+
 // Keys and slot semantics follow com.rdk.hal.compositeinput.PortProperty.
 constexpr PortPropertyToken kPortPropertyTokens[] = {
     {"SIGNAL_STRENGTH", PortProperty::SIGNAL_STRENGTH},
@@ -83,6 +95,22 @@ constexpr SignalStatusToken kSignalStatusTokens[] = {
     {"UNSTABLE", SignalStatus::UNSTABLE},
     {"NOT_SUPPORTED", SignalStatus::NOT_SUPPORTED},
     {"STABLE", SignalStatus::STABLE},
+};
+
+constexpr UtCommandToken kUtCommandTokens[] = {
+    {"setConnection", UtCommand::SET_CONNECTION},
+    {"setSignalStatus", UtCommand::SET_SIGNAL_STATUS},
+    {"setProperty", UtCommand::SET_PROPERTY},
+    {"setVideoMode", UtCommand::SET_VIDEO_MODE},
+    {"clearVideoMode", UtCommand::CLEAR_VIDEO_MODE},
+    // The host control plane emits snake_case command tokens; both spellings
+    // must resolve to the same dispatch value.
+    {"connection_status", UtCommand::SET_CONNECTION},
+    {"signal_status", UtCommand::SET_SIGNAL_STATUS},
+    {"set_property", UtCommand::SET_PROPERTY},
+    {"property_changed", UtCommand::SET_PROPERTY},
+    {"video_mode", UtCommand::SET_VIDEO_MODE},
+    {"clear_video_mode", UtCommand::CLEAR_VIDEO_MODE},
 };
 
 constexpr PropertyTypeToken kPropertyTypeTokens[] = {
@@ -171,6 +199,57 @@ bool signalStatusFromString(
     return false;
 }
 
+bool utCommandFromString(const std::string& token, UtCommand* outValue)
+{
+    if (outValue == nullptr)
+    {
+        return false;
+    }
+
+    const std::string normalized = trim(token);
+    for (const auto& entry : kUtCommandTokens)
+    {
+        if (normalized == entry.token)
+        {
+            *outValue = entry.value;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool makeVideoResolution(
+    int32_t pixelWidth,
+    int32_t pixelHeight,
+    bool interlaced,
+    float frameRateInHz,
+    ::com::rdk::hal::compositeinput::VideoResolution* outValue)
+{
+    if (outValue == nullptr)
+    {
+        return false;
+    }
+
+    if (pixelWidth <= 0 || pixelHeight <= 0 || frameRateInHz <= 0.0f)
+    {
+        LOGF_WARN(
+            "%s invalid video resolution %dx%d%s at %.3f Hz",
+            kLogPrefix,
+            pixelWidth,
+            pixelHeight,
+            interlaced ? "i" : "p",
+            frameRateInHz);
+        return false;
+    }
+
+    outValue->pixelWidth = pixelWidth;
+    outValue->pixelHeight = pixelHeight;
+    outValue->interlaced = interlaced;
+    outValue->frameRateInHz = frameRateInHz;
+    return true;
+}
+
 bool propertyTypeFromString(
     const std::string& token,
     ::com::rdk::hal::compositeinput::PropertyMetadata::PropertyType* outValue)
@@ -208,7 +287,8 @@ std::vector<::com::rdk::hal::compositeinput::PortProperty> toPortProperties(
         }
         else
         {
-            LOGF_ERROR("CompositeInput: Unknown PortProperty token in profile: '%s'",
+            LOGF_ERROR("%s Unknown PortProperty token in profile: '%s'",
+                       kLogPrefix,
                        token.c_str());
         }
     }
@@ -227,7 +307,8 @@ std::vector<::com::rdk::hal::compositeinput::PropertyMetadata> toPropertyMetadat
         PortProperty key{};
         if (!portPropertyFromString(entry.key, &key))
         {
-            LOGF_ERROR("CompositeInput: Unknown PropertyMetadata.key token in profile: '%s'",
+            LOGF_ERROR("%s Unknown PropertyMetadata.key token in profile: '%s'",
+                       kLogPrefix,
                        entry.key.c_str());
             continue;
         }
@@ -235,8 +316,10 @@ std::vector<::com::rdk::hal::compositeinput::PropertyMetadata> toPropertyMetadat
         PropertyMetadata::PropertyType type{};
         if (!propertyTypeFromString(entry.type, &type))
         {
-            LOGF_ERROR("CompositeInput: Unknown PropertyMetadata.type token in profile: '%s' (key=%s)",
-                       entry.type.c_str(), entry.key.c_str());
+            LOGF_ERROR("%s Unknown PropertyMetadata.type token in profile: '%s' (key=%s)",
+                       kLogPrefix,
+                       entry.type.c_str(),
+                       entry.key.c_str());
             continue;
         }
 
@@ -246,17 +329,19 @@ std::vector<::com::rdk::hal::compositeinput::PropertyMetadata> toPropertyMetadat
         item.readOnly = entry.readOnly;
         item.isMetric = entry.isMetric;
 
-        // Must match YAML exactly (VTS compares full equality including description).
+        // Conformance clients compare the parcelable for full equality, so the
+        // description must match the YAML exactly.
         item.description = entry.description;
 
         metadata.push_back(std::move(item));
     }
 
-    // If profile had entries but we mapped fewer, VTS will fail strict checks.
     if (!entries.empty() && metadata.size() != entries.size())
     {
-        LOGF_ERROR("CompositeInput: propertyMetadata mapping mismatch: profile=%zu mapped=%zu",
-                   entries.size(), metadata.size());
+        LOGF_ERROR("%s propertyMetadata mapping mismatch: profile=%zu mapped=%zu",
+                   kLogPrefix,
+                   entries.size(),
+                   metadata.size());
     }
 
     return metadata;
@@ -265,7 +350,7 @@ std::vector<::com::rdk::hal::compositeinput::PropertyMetadata> toPropertyMetadat
 std::optional<std::vector<std::optional<::com::rdk::hal::compositeinput::PropertyMetadata>>>
 toNullablePropertyMetadata(const std::vector<CompositeInputPropertyMetadataConfig>& entries)
 {
-    // VTS expects has_value() == true when profile provides metadata entries.
+    // The AIDL field is @nullable: engaged only when the profile declares entries.
     if (entries.empty())
     {
         return std::nullopt;

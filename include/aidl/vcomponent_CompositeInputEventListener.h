@@ -49,6 +49,14 @@ public:
     /**
      * @brief Dispatch the ICompositeInputEventListener.onStateChanged callback.
      *
+     * The callback itself is @c oneway. After dispatching, this method flushes
+     * the Binder command buffer and then performs a synchronous Binder ping
+     * round-trip to each listener that accepted the callback. That barrier
+     * ensures the published state edge has been serviced by the listener's
+     * process before the calling port advances to its next state or returns
+     * from an in-flight lifecycle operation. Ping failures are logged and
+     * swallowed, so an unresponsive observer cannot fail a HAL operation.
+     *
      * @param listeners Snapshot of listeners registered with a port.
      * @param oldState State before the port transition.
      * @param newState State after the port transition.

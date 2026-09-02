@@ -36,6 +36,7 @@
 #include <com/rdk/hal/compositeinput/PortProperty.h>
 #include <com/rdk/hal/compositeinput/PropertyMetadata.h>
 #include <com/rdk/hal/compositeinput/SignalStatus.h>
+#include <com/rdk/hal/compositeinput/VideoResolution.h>
 
 #include <optional>
 #include <string>
@@ -43,6 +44,18 @@
 
 namespace vcomponent::compositeinput::utility
 {
+
+/**
+ * @brief Recognised CompositeInput UT control-plane commands.
+ */
+enum class UtCommand
+{
+    SET_CONNECTION,
+    SET_SIGNAL_STATUS,
+    SET_PROPERTY,
+    SET_VIDEO_MODE,
+    CLEAR_VIDEO_MODE,
+};
 
 // PUBLIC_INTERFACE
 /**
@@ -89,6 +102,42 @@ bool portPropertyFromString(
 bool signalStatusFromString(
     const std::string& token,
     ::com::rdk::hal::compositeinput::SignalStatus* outValue);
+
+// PUBLIC_INTERFACE
+/**
+ * @brief Convert a UT command token to its internal dispatch value.
+ *
+ * Both the camelCase spellings (`setConnection`) and the snake_case spellings
+ * emitted by the host control plane (`connection_status`, `signal_status`,
+ * `video_mode`) are accepted and map onto the same dispatch value.
+ *
+ * @param[in]  token     Command identifier from UT (for example `setConnection`
+ *                       or `connection_status`).
+ * @param[out] outValue  Receives the mapped command value on success.
+ *
+ * @return True when the token is a supported CompositeInput UT command.
+ */
+bool utCommandFromString(const std::string& token, UtCommand* outValue);
+
+// PUBLIC_INTERFACE
+/**
+ * @brief Build a valid AIDL VideoResolution parcelable from scalar values.
+ *
+ * @param[in]  pixelWidth     Horizontal resolution in pixels.
+ * @param[in]  pixelHeight    Vertical resolution in pixels.
+ * @param[in]  interlaced     Whether the video mode is interlaced.
+ * @param[in]  frameRateInHz  Frame rate in hertz.
+ * @param[out] outValue       Receives the constructed parcelable on success.
+ *
+ * @return True if the dimensions and frame rate are positive and the output was
+ *         populated; otherwise false.
+ */
+bool makeVideoResolution(
+    int32_t pixelWidth,
+    int32_t pixelHeight,
+    bool interlaced,
+    float frameRateInHz,
+    ::com::rdk::hal::compositeinput::VideoResolution* outValue);
 
 // PUBLIC_INTERFACE
 /**
