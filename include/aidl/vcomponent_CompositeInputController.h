@@ -71,7 +71,8 @@ public:
     /**
      * @brief Set a mutable port property.
      *
-     * CompositeInput's HFP properties are presently read-only telemetry values.
+     * Writability is determined by the owning port's HFP-derived
+     * `PropertyMetadata.readOnly` value.
      *
      * @param property Requested property key.
      * @param value Requested property value.

@@ -48,6 +48,7 @@ constexpr const char* kInterfaceVersionKey = "compositeinput.interfaceVersion";
 constexpr const char* kPortsKey = "compositeinput.ports";
 constexpr const char* kPlatformCapabilitiesKey = "compositeinput.platformCapabilities";
 constexpr size_t kKvpBufferSize = UT_KVP_MAX_ELEMENT_SIZE;
+constexpr const char* kLogPrefix = "[VDEVICE_COMPOSITEINPUT]<CompositeInputParseConfig>";
 
 /**
  * @brief Set an optional parser error message.
@@ -695,7 +696,8 @@ bool vcomponent_CompositeInput_parseConfig(
     }
 
     compositeInputConfiguration = std::move(parsedConfig);
-    LOGF_INFO("CompositeInput HFP parsing completed successfully. path=%s",
+    LOGF_INFO("%s CompositeInput HFP parsing completed successfully. path=%s",
+              kLogPrefix,
               configurationFile);
     return true;
 }

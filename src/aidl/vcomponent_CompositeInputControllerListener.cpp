@@ -24,6 +24,12 @@
 namespace com::rdk::hal::compositeinput
 {
 
+namespace
+{
+constexpr const char* kLogPrefix =
+    "[VDEVICE_COMPOSITEINPUT]<CompositeInputControllerListener>";
+} // namespace
+
 void CompositeInputControllerListener::onConnectionChanged(
     const android::sp<ICompositeInputControllerListener>& listener,
     bool connected)
@@ -36,8 +42,8 @@ void CompositeInputControllerListener::onConnectionChanged(
     const android::binder::Status status = listener->onConnectionChanged(connected);
     if (!status.isOk())
     {
-        LOGF_WARN("[VDEVICE_COMPOSITEINPUT]<ControllerListener> "
-                  "onConnectionChanged callback failed: %s",
+        LOGF_WARN("%s onConnectionChanged callback failed: %s",
+                  kLogPrefix,
                   status.toString8().c_str());
     }
 }
@@ -55,8 +61,8 @@ void CompositeInputControllerListener::onSignalStatusChanged(
         listener->onSignalStatusChanged(signalStatus);
     if (!status.isOk())
     {
-        LOGF_WARN("[VDEVICE_COMPOSITEINPUT]<ControllerListener> "
-                  "onSignalStatusChanged callback failed: %s",
+        LOGF_WARN("%s onSignalStatusChanged callback failed: %s",
+                  kLogPrefix,
                   status.toString8().c_str());
     }
 }
@@ -73,8 +79,8 @@ void CompositeInputControllerListener::onVideoModeChanged(
     const android::binder::Status status = listener->onVideoModeChanged(resolution);
     if (!status.isOk())
     {
-        LOGF_WARN("[VDEVICE_COMPOSITEINPUT]<ControllerListener> "
-                  "onVideoModeChanged callback failed: %s",
+        LOGF_WARN("%s onVideoModeChanged callback failed: %s",
+                  kLogPrefix,
                   status.toString8().c_str());
     }
 }

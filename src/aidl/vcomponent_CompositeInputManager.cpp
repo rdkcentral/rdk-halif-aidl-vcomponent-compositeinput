@@ -19,12 +19,7 @@
 
 /**
  * @file vcomponent_CompositeInputManager.cpp
- * @brief SKELETON ICompositeInputManager implementation backed by the CompositeInput HFP.
- *
- * Every method declared in vcomponent_CompositeInputManager.h is defined here.
- * The Binder plumbing (service name, publication, guarded accessors) is real so
- * the service starts and answers calls deterministically; the HFP mapping and UT
- * command routing are left as documented placeholders.
+ * @brief ICompositeInputManager implementation backed by the CompositeInput HFP.
  */
 
 #include "aidl/vcomponent_CompositeInputManager.h"
@@ -40,6 +35,8 @@
 #include <binder/ProcessState.h>
 #include <utils/String16.h>
 
+#include <ut_kvp_profile.h>
+
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -50,10 +47,10 @@ namespace com::rdk::hal::compositeinput
 
 namespace
 {
-constexpr const char* componentName = "CompositeInputManager";
+constexpr const char* kLogPrefix = "[VDEVICE_COMPOSITEINPUT]<CompositeInputManager>";
 
 // UT control-plane port for CompositeInput orchestration (default).
-constexpr std::uint16_t kDefaultUtControlPlanePort = 8080;
+constexpr std::uint16_t kDefaultUtControlPlanePort = 8086;
 
 // Configurable UT control-plane port (overridable by service main via
 // setControlPlanePort()).
@@ -82,15 +79,33 @@ std::uint16_t getConfiguredUtControlPlanePort()
     std::lock_guard<std::mutex> lock(g_utControlPlanePortMutex);
     return g_utControlPlanePort;
 }
+
+/**
+ * @brief Map one parsed HFP port entry to the AIDL PortCapabilities parcelable.
+ *
+ * @param[in] portConfig Parsed HFP port entry.
+ * @return Capabilities to feed into the corresponding CompositeInputPort.
+ */
+PortCapabilities mapPortCapabilities(
+    const vcomponent::compositeinput::utility::CompositeInputPortConfig& portConfig)
+{
+    namespace hfp = vcomponent::compositeinput::utility;
+
+    PortCapabilities capabilities{};
+    capabilities.supportedProperties = hfp::toPortProperties(portConfig.supportedProperties);
+
+    // `PortCapabilities.propertyMetadata` is an AIDL `@nullable PropertyMetadata[]`;
+    // the helper yields std::nullopt when the profile declares no metadata.
+    capabilities.propertyMetadata = hfp::toNullablePropertyMetadata(portConfig.propertyMetadata);
+
+    return capabilities;
+}
 } // namespace
 
 const char* CompositeInputManager::getServiceName()
 {
-    // NOTE:
-    // Depending on the AIDL-generated headers, ICompositeInputManager::serviceName()
-    // may return an std::string by value. Calling c_str() on that temporary would
-    // yield a dangling pointer. Cache the value in static storage to ensure a
-    // stable C-string.
+    // serviceName() may return a temporary std::string, so cache it in static
+    // storage to keep the returned C-string valid.
     static const std::string kServiceName = ICompositeInputManager::serviceName();
     return kServiceName.c_str();
 }
@@ -99,8 +114,8 @@ void CompositeInputManager::setConfigurationPath(const std::string& configuratio
 {
     if (configurationPath.empty())
     {
-        LOGF_WARN("%s: Empty CompositeInput configuration path ignored; keeping path=%s",
-                  componentName,
+        LOGF_WARN("%s Empty CompositeInput configuration path ignored; keeping path=%s",
+                  kLogPrefix,
                   getConfiguredPath().c_str());
         return;
     }
@@ -113,8 +128,8 @@ void CompositeInputManager::setControlPlanePort(std::uint16_t port)
 {
     if (port == 0)
     {
-        LOGF_WARN("%s: Invalid UT control-plane port=0; keeping default=%u",
-                  componentName,
+        LOGF_WARN("%s Invalid UT control-plane port=0; keeping default=%u",
+                  kLogPrefix,
                   static_cast<unsigned>(kDefaultUtControlPlanePort));
         return;
     }
@@ -125,30 +140,30 @@ void CompositeInputManager::setControlPlanePort(std::uint16_t port)
 
 CompositeInputManager::CompositeInputManager()
 {
-    // Bring up the UT control plane before any configuration work so early
+    // Bring up the UT control plane before configuration work so early
     // orchestration messages are queued rather than dropped.
     const auto port = getConfiguredUtControlPlanePort();
     if (!m_ut.init(port, nullptr))
     {
-        LOGF_WARN("%s: UT control plane init failed (see UT logs). port=%u",
-                  componentName,
+        LOGF_WARN("%s UT control plane init failed (see UT logs). port=%u",
+                  kLogPrefix,
                   static_cast<unsigned>(port));
     }
 
     const std::string configurationPath = getConfiguredPath();
     if (loadCapabilitiesFromConfig(configurationPath))
     {
-        LOGF_INFO("%s: Initialized CompositeInput manager from HFP configuration "
+        LOGF_INFO("%s Initialized CompositeInput manager from HFP configuration "
                   "path=%s ports=%llu.",
-                  componentName,
+                  kLogPrefix,
                   configurationPath.c_str(),
                   static_cast<unsigned long long>(m_ports.size()));
     }
     else
     {
-        LOGF_WARN("%s: Initialized CompositeInput manager with default capabilities; "
-                  "HFP configuration was not applied. path=%s",
-                  componentName,
+        LOGF_WARN("%s CompositeInput manager has no capabilities or ports; the HFP "
+                  "configuration was not applied and no fallback profile exists. path=%s",
+                  kLogPrefix,
                   configurationPath.c_str());
     }
 
@@ -170,7 +185,7 @@ bool CompositeInputManager::loadCapabilitiesFromConfig(const std::string& config
 {
     if (configurationPath.empty())
     {
-        LOGF_WARN("%s: CompositeInput HFP configuration path is empty", componentName);
+        LOGF_WARN("%s CompositeInput HFP configuration path is empty", kLogPrefix);
         return false;
     }
 
@@ -182,8 +197,8 @@ bool CompositeInputManager::loadCapabilitiesFromConfig(const std::string& config
             &parsedConfig,
             &parseError))
     {
-        LOGF_WARN("%s: CompositeInput HFP parse failed path=%s error=%s",
-                  componentName,
+        LOGF_WARN("%s CompositeInput HFP parse failed path=%s error=%s",
+                  kLogPrefix,
                   configurationPath.c_str(),
                   parseError.c_str());
         return false;
@@ -202,28 +217,38 @@ bool CompositeInputManager::loadCapabilitiesFromConfig(const std::string& config
     {
         if (portConfig.id < 0)
         {
-            LOGF_WARN("%s: Skipping HFP port with invalid id=%d",
-                      componentName,
+            LOGF_WARN("%s Skipping HFP port with invalid id=%d",
+                      kLogPrefix,
                       static_cast<int>(portConfig.id));
             continue;
         }
 
         if (std::find(seenIds.begin(), seenIds.end(), portConfig.id) != seenIds.end())
         {
-            LOGF_WARN("%s: Skipping HFP port with duplicate id=%d",
-                      componentName,
+            LOGF_WARN("%s Skipping HFP port with duplicate id=%d",
+                      kLogPrefix,
                       static_cast<int>(portConfig.id));
             continue;
         }
 
         seenIds.push_back(portConfig.id);
-        ports.push_back(new CompositeInputPort(portConfig));
+
+        android::sp<CompositeInputPort> port = new CompositeInputPort(portConfig.id);
+        port->setPortInfo(portConfig.name, portConfig.description);
+        port->setCapabilities(mapPortCapabilities(portConfig));
+
+        // Ports come up at the power-on hardware baseline; this is the only
+        // place the snapshot is cleared, so UT-driven state survives later
+        // controller close/open cycles.
+        port->resetHardwareBaselineForBoot();
+
+        ports.push_back(std::move(port));
     }
 
     if (ports.empty())
     {
-        LOGF_WARN("%s: CompositeInput HFP yielded no usable port path=%s",
-                  componentName,
+        LOGF_WARN("%s CompositeInput HFP yielded no usable port path=%s",
+                  kLogPrefix,
                   configurationPath.c_str());
         return false;
     }
@@ -259,6 +284,11 @@ bool CompositeInputManager::loadCapabilitiesFromConfig(const std::string& config
     platformCaps.features.macrovisionDetectionSupported =
         parsedConfig.features.macrovisionDetectionSupported;
 
+    // Propagate the HFP-declared concurrency limit to the port layer so
+    // start() enforcement follows the profile instead of a hardcoded value.
+    CompositeInputPort::setMaxConcurrentStartedPorts(
+        platformCaps.maximumConcurrentStartedPorts);
+
     std::lock_guard<std::mutex> lock(m_mutex);
     m_platformCaps = platformCaps;
     m_ports = std::move(ports);
@@ -290,13 +320,78 @@ void CompositeInputManager::handleQueuedUtMessage(
         return;
     }
 
-    // TODO(impl): parse `payload` into a KVP instance
-    // (ut_kvp_createInstance + ut_kvp_openMemory over a mutable copy), read
-    // `compositeinput.command`, resolve the target port from
-    // `compositeinput.params.port` (defaulting to 0), forward the instance via
-    // CompositeInputPort::handleUTControlPlaneMessage(), then destroy the
-    // instance. Not required by the L1 suite; lands with the real
-    // implementation (see vDevice/impl/README.md).
+    ut_kvp_instance_t* kvp = ut_kvp_createInstance();
+    if (kvp == nullptr)
+    {
+        LOGF_ERROR("%s ut_kvp_createInstance failed", kLogPrefix);
+        return;
+    }
+
+    // The UT parser mutates its input buffer, so it must not receive the
+    // immutable string stored in the message queue.
+    std::vector<char> mutablePayload(payload.begin(), payload.end());
+    mutablePayload.push_back('\0');
+
+    // The trailing NUL must NOT be included in the length: the YAML parser
+    // validates every byte in range and rejects an embedded NUL.
+    const auto status = ut_kvp_openMemory(
+        kvp,
+        mutablePayload.data(),
+        static_cast<uint32_t>(payload.size()));
+    if (status != UT_KVP_STATUS_SUCCESS)
+    {
+        LOGF_ERROR("%s ut_kvp_openMemory failed status=%d payload_size=%zu",
+                   kLogPrefix,
+                   status,
+                   payload.size());
+        ut_kvp_destroyInstance(kvp);
+        return;
+    }
+
+    char receivedCommand[128] = {0};
+    ut_kvp_getStringField(
+        kvp, "compositeinput.command", receivedCommand, sizeof(receivedCommand));
+    LOGF_INFO("%s UT_RX cmd='%s' has_cmd=%d has_connected=%d has_signalStatus=%d",
+              kLogPrefix,
+              receivedCommand,
+              static_cast<int>(ut_kvp_fieldPresent(kvp, "compositeinput.command")),
+              static_cast<int>(ut_kvp_fieldPresent(kvp, "compositeinput.params.connected")),
+              static_cast<int>(ut_kvp_fieldPresent(kvp, "compositeinput.params.signalStatus")));
+
+    int32_t portId = 0;
+    if (ut_kvp_fieldPresent(kvp, "compositeinput.params.port"))
+    {
+        portId = static_cast<int32_t>(
+            ut_kvp_getUInt32Field(kvp, "compositeinput.params.port"));
+    }
+
+    android::sp<CompositeInputPort> targetPort;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it = std::find_if(
+            m_ports.begin(),
+            m_ports.end(),
+            [portId](const auto& port) {
+                return port != nullptr && port->id() == portId;
+            });
+        if (it != m_ports.end())
+        {
+            targetPort = *it;
+        }
+    }
+
+    if (targetPort != nullptr)
+    {
+        targetPort->handleUTControlPlaneMessage(kvp);
+    }
+    else
+    {
+        LOGF_WARN("%s UT message targeted unknown port id=%d",
+                  kLogPrefix,
+                  static_cast<int>(portId));
+    }
+
+    ut_kvp_destroyInstance(kvp);
 }
 
 int CompositeInputManager::publishAndJoinThreadPool()
@@ -305,16 +400,16 @@ int CompositeInputManager::publishAndJoinThreadPool()
     android::sp<android::IServiceManager> serviceManager = android::defaultServiceManager();
     android::sp<CompositeInputManager> service = new CompositeInputManager();
 
-    LOGF_INFO("%s: Publishing CompositeInput Binder service (serviceName=%s)",
-              componentName,
+    LOGF_INFO("%s Publishing CompositeInput Binder service (serviceName=%s)",
+              kLogPrefix,
               serviceName);
 
     const android::status_t status =
         serviceManager->addService(android::String16(serviceName), service);
     if (status != android::OK)
     {
-        LOGF_ERROR("%s: addService(%s) failed: %d",
-                   componentName,
+        LOGF_ERROR("%s addService(%s) failed: %d",
+                   kLogPrefix,
                    serviceName,
                    static_cast<int>(status));
         return 1;
@@ -328,7 +423,7 @@ int CompositeInputManager::publishAndJoinThreadPool()
 android::binder::Status CompositeInputManager::getPlatformCapabilities(
     PlatformCapabilities* _aidl_return)
 {
-    LOGF_INFO("[VDEVICE_COMPOSITEINPUT][%s::%s] entry", componentName, "getPlatformCapabilities");
+    LOGF_INFO("%s getPlatformCapabilities entry", kLogPrefix);
 
     if (_aidl_return == nullptr)
     {
@@ -343,10 +438,10 @@ android::binder::Status CompositeInputManager::getPlatformCapabilities(
 
 android::binder::Status CompositeInputManager::getPortIds(std::vector<int32_t>* _aidl_return)
 {
-    LOGF_INFO("[VDEVICE_COMPOSITEINPUT][%s::%s] entry", componentName, "getPortIds");
+    LOGF_INFO("%s getPortIds entry", kLogPrefix);
     if (_aidl_return == nullptr)
     {
-        LOGF_ERROR("%s: getPortIds: null _aidl_return", componentName);
+        LOGF_ERROR("%s getPortIds: null _aidl_return", kLogPrefix);
         return android::binder::Status::fromExceptionCode(
             android::binder::Status::EX_NULL_POINTER);
     }
@@ -371,13 +466,10 @@ android::binder::Status CompositeInputManager::getPort(
     int32_t portId,
     android::sp<ICompositeInputPort>* _aidl_return)
 {
-    LOGF_INFO("[VDEVICE_COMPOSITEINPUT][%s::%s] entry id=%d",
-              componentName,
-              "getPort",
-              static_cast<int>(portId));
+    LOGF_INFO("%s getPort entry id=%d", kLogPrefix, static_cast<int>(portId));
     if (_aidl_return == nullptr)
     {
-        LOGF_ERROR("%s: getPort: null _aidl_return", componentName);
+        LOGF_ERROR("%s getPort: null _aidl_return", kLogPrefix);
         return android::binder::Status::fromExceptionCode(
             android::binder::Status::EX_NULL_POINTER);
     }
@@ -387,7 +479,7 @@ android::binder::Status CompositeInputManager::getPort(
 
     if (portId < 0)
     {
-        LOGF_WARN("%s: getPort: invalid id=%d", componentName, static_cast<int>(portId));
+        LOGF_WARN("%s getPort: invalid id=%d", kLogPrefix, static_cast<int>(portId));
         return android::binder::Status::fromExceptionCode(
             android::binder::Status::EX_ILLEGAL_ARGUMENT);
     }
@@ -403,7 +495,7 @@ android::binder::Status CompositeInputManager::getPort(
         return android::binder::Status::ok();
     }
 
-    LOGF_WARN("%s: getPort: not found id=%d", componentName, static_cast<int>(portId));
+    LOGF_WARN("%s getPort: not found id=%d", kLogPrefix, static_cast<int>(portId));
     return android::binder::Status::fromExceptionCode(
         android::binder::Status::EX_ILLEGAL_ARGUMENT);
 }

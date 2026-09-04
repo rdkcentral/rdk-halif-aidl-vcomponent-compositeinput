@@ -88,7 +88,7 @@ public:
     /**
      * @brief Optionally override the UT control-plane port used by the manager.
      *
-     * If not called, the manager uses its internal default port (currently 8080).
+     * If not called, the manager uses its internal default port (currently 8086).
      *
      * @param[in] port TCP port for the UT control plane (1..65535).
      */

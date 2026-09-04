@@ -22,6 +22,17 @@
 /**
  * @file vcomponent_CompositeInputUtController.h
  * @brief UT-controller facade for the CompositeInput vcomponent.
+ *
+ * This header owns the complete UT control-plane vocabulary for the component,
+ * mirroring the composite reference vcomponent:
+ *  - the fully-qualified KVP message keys,
+ *  - the recognised command set, and
+ *  - the ut-core `ut_control_keyStringMapping_t` table used to decode a received
+ *    command token into that command set.
+ *
+ * Keeping the vocabulary in one place means the manager (queue consumer) and the
+ * port (command executor) can never drift apart, and a new command only has to
+ * be declared once.
  */
 
 #include "utility/vcomponent_CompositeInputHfpConfigUtils.h"
@@ -38,8 +49,60 @@
 #include <string>
 #include <tuple>
 
+/*
+ * UT control-plane message keys.
+ *
+ * The keys are fully-qualified KVP paths rooted at the `compositeinput` profile
+ * key registered with the control plane, exactly as used by the composite
+ * reference vcomponent and the host command YAMLs.
+ */
+#define COMPOSITEINPUT_UTCONTROL_PROFILE_KEY          "compositeinput"
+#define COMPOSITEINPUT_UTCONTROL_COMMAND_KEY          "compositeinput.command"
+#define COMPOSITEINPUT_UTCONTROL_PORT_KEY             "compositeinput.params.port"
+#define COMPOSITEINPUT_UTCONTROL_CONNECTION_KEY       "compositeinput.params.connected"
+#define COMPOSITEINPUT_UTCONTROL_SIGNAL_STATUS_KEY    "compositeinput.params.signalStatus"
+#define COMPOSITEINPUT_UTCONTROL_VIDEO_WIDTH_KEY      "compositeinput.params.pixelWidth"
+#define COMPOSITEINPUT_UTCONTROL_VIDEO_HEIGHT_KEY     "compositeinput.params.pixelHeight"
+#define COMPOSITEINPUT_UTCONTROL_VIDEO_INTERLACED_KEY "compositeinput.params.interlaced"
+#define COMPOSITEINPUT_UTCONTROL_VIDEO_FRAMERATE_KEY  "compositeinput.params.frameRateInHz"
+#define COMPOSITEINPUT_UTCONTROL_PROPERTY_KEY         "compositeinput.params.key"
+#define COMPOSITEINPUT_UTCONTROL_INT_VALUE_KEY        "compositeinput.params.intValue"
+#define COMPOSITEINPUT_UTCONTROL_LONG_VALUE_KEY       "compositeinput.params.longValue"
+
 namespace vcomponent::compositeinput::controller
 {
+
+/**
+ * @brief Commands accepted over the CompositeInput UT control plane.
+ *
+ * The values are stable so they can be carried through the ut-core
+ * `ut_control_keyStringMapping_t` table, which trades in `int32_t`.
+ */
+enum class CompositeInputUtCommand : std::int32_t
+{
+    CONNECTION_STATUS = 0, /**< Set the cable connection state on a port. */
+    SIGNAL_STATUS     = 1, /**< Set the signal status on a port. */
+    VIDEO_MODE        = 2, /**< Report a detected video mode on a started port. */
+    SET_PROPERTY      = 3, /**< Seed a port property value. */
+    CLEAR_VIDEO_MODE  = 4, /**< Drop the cached detected video mode. */
+    UNKNOWN           = -1 /**< Unrecognised command token. */
+};
+
+/**
+ * @brief ut-core token to CompositeInputUtCommand mapping table.
+ *
+ * Both the reference snake_case spellings (`connection_status`,
+ * `signal_status`, `video_mode`) and the camelCase spellings (`setConnection`,
+ * `setSignalStatus`, `setVideoMode`) are declared so a host naming difference
+ * cannot silently drop a command. Terminated by a `{NULL, -1}` sentinel as
+ * required by ut-control.
+ */
+extern const ut_control_keyStringMapping_t compositeInputUtControllerMapTable[];
+
+/**
+ * @brief One queued UT control-plane message: {message key, payload, user data}.
+ */
+using CompositeInputUtMessage = std::tuple<std::string, std::string, void*>;
 
 /**
  * @brief UT-controller facade for the CompositeInput vcomponent.
@@ -64,6 +127,20 @@ public:
 
     CompositeInputUtController(const CompositeInputUtController&) = delete;
     CompositeInputUtController& operator=(const CompositeInputUtController&) = delete;
+
+    // PUBLIC_INTERFACE
+    /**
+     * @brief Decode a received UT command token into its command value.
+     *
+     * The decode goes through the ut-core map table (composite reference
+     * parity), so every accepted spelling of a command resolves to the same
+     * value and an unrecognised token yields CompositeInputUtCommand::UNKNOWN.
+     *
+     * @param[in] token Command token exactly as received from the control plane.
+     *
+     * @return The decoded command, or CompositeInputUtCommand::UNKNOWN.
+     */
+    static CompositeInputUtCommand decodeCommand(const std::string& token);
 
     // PUBLIC_INTERFACE
     /**
@@ -116,7 +193,7 @@ public:
      *
      * @return Optional tuple containing message key, payload, and caller user data.
      */
-    std::optional<std::tuple<std::string, std::string, void*>> getMessage();
+    std::optional<CompositeInputUtMessage> getMessage();
 
     // PUBLIC_INTERFACE
     /**
@@ -137,7 +214,7 @@ private:
     void* m_userData;
 
     mutable std::mutex m_queueMutex;
-    std::queue<std::tuple<std::string, std::string, void*>> m_messageQueue;
+    std::queue<CompositeInputUtMessage> m_messageQueue;
 };
 
 } // namespace vcomponent::compositeinput::controller
