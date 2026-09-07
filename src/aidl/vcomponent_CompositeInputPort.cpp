@@ -508,7 +508,8 @@ void CompositeInputPort::handleUTControlPlaneMessage(ut_kvp_instance_t* kvp)
         const auto cacheKey = static_cast<int32_t>(property);
         const ::com::rdk::hal::PropertyValue value =
             ut_kvp_fieldPresent(kvp, kLongValueKey)
-                ? makeInt64(ut_kvp_getInt64Field(kvp, kLongValueKey))
+                // Convert its 64-bit result to the signed AIDL longValue type.
+                ? makeInt64(static_cast<int64_t>(ut_kvp_getUInt64Field(kvp, kLongValueKey)))
                 : makeInt32(static_cast<int32_t>(
                       ut_kvp_getUInt32Field(kvp, kIntValueKey)));
 
