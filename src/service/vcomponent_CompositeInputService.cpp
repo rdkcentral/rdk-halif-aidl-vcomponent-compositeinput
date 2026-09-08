@@ -28,7 +28,10 @@
 #include "common/logger.h"
 #include "utility/vcomponent_CompositeInputHelper.h"
 
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 
 namespace
@@ -36,22 +39,55 @@ namespace
 constexpr const char* kLogPrefix = "[VDEVICE_COMPOSITEINPUT]<CompositeInputService>";
 
 /**
+ * @brief Parse a TCP port in the valid non-zero uint16_t range.
+ *
+ * @param value String representation of the port.
+ * @param[out] outPort Receives the parsed port on success.
+ *
+ * @return True when @p value is a decimal port in the range 1..65535.
+ */
+bool parsePort(const char* value, std::uint16_t* outPort)
+{
+    if (value == nullptr || value[0] == '\0' || outPort == nullptr)
+    {
+        return false;
+    }
+
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == nullptr || *end != '\0' || parsed <= 0 || parsed > 65535)
+    {
+        return false;
+    }
+
+    *outPort = static_cast<std::uint16_t>(parsed);
+    return true;
+}
+
+/**
  * @brief Parse the supported command-line arguments.
  *
  * @param argc Argument count.
  * @param argv Argument vector.
  * @param[out] outHfpPath Receives the HFP YAML path to use.
+ * @param[out] outPort Receives an optional UT control-plane port override.
  *
  * @return True when parsing succeeded and the service may continue.
  */
-bool parseArgs(int argc, char** argv, std::string* outHfpPath)
+bool parseArgs(
+    int argc,
+    char** argv,
+    std::string* outHfpPath,
+    std::optional<std::uint16_t>* outPort)
 {
-    if (outHfpPath == nullptr || argc < 1 || argv == nullptr || argv[0] == nullptr)
+    if (outHfpPath == nullptr || outPort == nullptr || argc < 1 || argv == nullptr ||
+        argv[0] == nullptr)
     {
         return false;
     }
 
     *outHfpPath = vcomponent::compositeinput::service::kDefaultHfpPath;
+    *outPort = std::nullopt;
 
     for (int index = 1; index < argc; ++index)
     {
@@ -78,6 +114,26 @@ bool parseArgs(int argc, char** argv, std::string* outHfpPath)
             continue;
         }
 
+        if (std::strcmp(argument, "--port") == 0)
+        {
+            if (index + 1 >= argc || argv[index + 1] == nullptr || argv[index + 1][0] == '\0')
+            {
+                LOGF_ERROR("%s Missing value for --port", kLogPrefix);
+                return false;
+            }
+
+            std::uint16_t port = 0;
+            if (!parsePort(argv[index + 1], &port))
+            {
+                LOGF_ERROR("%s Invalid --port value: %s", kLogPrefix, argv[index + 1]);
+                return false;
+            }
+
+            *outPort = port;
+            ++index;
+            continue;
+        }
+
         LOGF_ERROR("%s Unknown argument: %s", kLogPrefix, argument);
         return false;
     }
@@ -92,11 +148,12 @@ void vcomponent::compositeinput::service::printUsage(const char* argv0)
         (argv0 != nullptr && argv0[0] != '\0') ? argv0 : "RDKCompositeInputService";
 
     LOGF_INFO("Usage:");
-    LOGF_INFO("  %s [--hfp <path>]", executable);
+    LOGF_INFO("  %s [--hfp <path>] [--port <port>]", executable);
     LOGF_INFO("");
     LOGF_INFO("Args:");
     LOGF_INFO("  --hfp <path> Optional CompositeInput HFP YAML path (default: %s).",
               kDefaultHfpPath);
+    LOGF_INFO("  --port <port> Optional UT Control Plane port (default: manager default).");
 }
 
 /**
@@ -116,7 +173,8 @@ int main(int argc, char** argv)
     LOGF_INFO("%s ===============================", kLogPrefix);
 
     std::string hfpPath;
-    if (!parseArgs(argc, argv, &hfpPath))
+    std::optional<std::uint16_t> port;
+    if (!parseArgs(argc, argv, &hfpPath, &port))
     {
         vcomponent::compositeinput::service::printUsage(argc > 0 ? argv[0] : nullptr);
         return 2;
@@ -150,6 +208,20 @@ int main(int argc, char** argv)
                   kLogPrefix,
                   hfpPath.c_str(),
                   hfpContents->size());
+    }
+
+    // The manager owns the UT control plane and its default. The service only
+    // supplies an explicit command-line override when one was requested.
+    if (port.has_value())
+    {
+        LOGF_INFO("%s Using UT control-plane port from CLI: %u",
+                  kLogPrefix,
+                  static_cast<unsigned>(*port));
+        CompositeInputManager::setControlPlanePort(*port);
+    }
+    else
+    {
+        LOGF_INFO("%s Using UT control-plane port default (manager default)", kLogPrefix);
     }
 
     // Hand configuration to the manager, then publish and block on Binder.

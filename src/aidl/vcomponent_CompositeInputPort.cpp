@@ -255,7 +255,285 @@ void CompositeInputPort::setCapabilities(const PortCapabilities& capabilities)
 
 void CompositeInputPort::handleUTControlPlaneMessage(ut_kvp_instance_t* kvp)
 {
-   ////TODO in L3 
+    if (kvp == nullptr)
+    {
+        LOGF_ERROR("%s handleUTControlPlaneMessage port=%d: null kvp instance",
+                   kLogPrefix,
+                   m_portId);
+        return;
+    }
+
+    char command[128] = {0};
+    ut_kvp_getStringField(kvp, kUtCommandKey, command, sizeof(command));
+    const std::string rawCommandToken(command);
+
+    // Decode through the UT controller map table so the snake_case and
+    // camelCase spellings resolve to the same command.
+    const UtCommand utCommand = UtController::decodeCommand(rawCommandToken);
+    LOGF_INFO("%s UT CMD port=%d rawCommand=%s",
+              kLogPrefix,
+              m_portId,
+              rawCommandToken.c_str());
+
+    if (utCommand == UtCommand::CONNECTION_STATUS)
+    {
+        if (!ut_kvp_fieldPresent(kvp, kConnectedKey))
+        {
+            LOGF_WARN("%s setConnection missing connected parameter", kLogPrefix);
+            return;
+        }
+
+        const bool connected = ut_kvp_getBoolField(kvp, kConnectedKey);
+        android::sp<ICompositeInputControllerListener> controllerListener;
+        bool connectionChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            connectionChanged = (m_cachedStatus.connected != connected);
+            m_cachedStatus.connected = connected;
+
+            // A connection transition never synthesizes a signal status: that
+            // stream is owned exclusively by UtCommand::SIGNAL_STATUS.
+
+            // A disconnected physical input cannot retain a detected mode.
+            if (!connected)
+            {
+                m_cachedStatus.detectedResolution = std::nullopt;
+            }
+
+            controllerListener = m_controllerListener;
+        }
+
+        LOGF_INFO("%s UT CONNECTION_STATUS port=%d connected=%d changed=%d",
+                  kLogPrefix,
+                  m_portId,
+                  static_cast<int>(connected),
+                  static_cast<int>(connectionChanged));
+
+        if (connectionChanged)
+        {
+            CompositeInputControllerListener::onConnectionChanged(
+                controllerListener, connected);
+        }
+        return;
+    }
+
+    if (utCommand == UtCommand::SIGNAL_STATUS)
+    {
+        if (!ut_kvp_fieldPresent(kvp, kSignalStatusKey))
+        {
+            LOGF_WARN("%s setSignalStatus missing signalStatus parameter", kLogPrefix);
+            return;
+        }
+
+        char signalStatusToken[128] = {0};
+        ut_kvp_getStringField(
+            kvp, kSignalStatusKey, signalStatusToken, sizeof(signalStatusToken));
+
+        SignalStatus signalStatus{};
+        if (!vcomponent::compositeinput::utility::signalStatusFromString(
+                signalStatusToken, &signalStatus))
+        {
+            LOGF_WARN("%s setSignalStatus has invalid signalStatus=%s",
+                      kLogPrefix,
+                      signalStatusToken);
+            return;
+        }
+
+        // The cached PortStatus.signalStatus mirrors the physical input and is
+        // always updated, while the derived telemetry is session scoped and is
+        // refreshed only while a controller session is open.
+        android::sp<ICompositeInputControllerListener> controllerListener;
+        std::vector<android::sp<ICompositeInputEventListener>> signalEventListeners;
+        bool publishTelemetry = false;
+
+        const ::com::rdk::hal::PropertyValue strengthValue =
+            makeInt64(signalStrengthDbmFor(signalStatus));
+        const ::com::rdk::hal::PropertyValue qualityValue =
+            makeInt32(signalQualityFor(signalStatus));
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_cachedStatus.signalStatus = signalStatus;
+
+            // A detected resolution is meaningful only for a stable signal.
+            if (signalStatus != SignalStatus::STABLE)
+            {
+                m_cachedStatus.detectedResolution = std::nullopt;
+            }
+
+            controllerListener = m_controllerListener;
+            signalEventListeners = m_eventListeners;
+            publishTelemetry = (m_state == State::STARTING || m_state == State::STARTED);
+
+            if (publishTelemetry)
+            {
+                m_cachedProperties[static_cast<int32_t>(PortProperty::SIGNAL_STRENGTH)] =
+                    strengthValue;
+                m_cachedProperties[static_cast<int32_t>(PortProperty::SIGNAL_QUALITY)] =
+                    qualityValue;
+            }
+        }
+
+        LOGF_INFO("%s UT SIGNAL_STATUS port=%d status=%d strength=%lld quality=%d",
+                  kLogPrefix,
+                  m_portId,
+                  static_cast<int>(signalStatus),
+                  static_cast<long long>(signalStrengthDbmFor(signalStatus)),
+                  static_cast<int>(signalQualityFor(signalStatus)));
+
+        // Binder callbacks may re-enter the component, so notify only after
+        // releasing the port mutex.
+        if (publishTelemetry)
+        {
+            CompositeInputEventListener::onPropertyChanged(
+                signalEventListeners, PortProperty::SIGNAL_STRENGTH, strengthValue);
+            CompositeInputEventListener::onPropertyChanged(
+                signalEventListeners, PortProperty::SIGNAL_QUALITY, qualityValue);
+        }
+
+        // Each valid signal command is an observable hardware report, even when
+        // it repeats the cached baseline, so it is never suppressed.
+        if (controllerListener != nullptr)
+        {
+            CompositeInputControllerListener::onSignalStatusChanged(
+                controllerListener, signalStatus);
+        }
+        return;
+    }
+
+    if (utCommand == UtCommand::VIDEO_MODE)
+    {
+        // Resolve every geometry parameter from its accepted key spellings so a
+        // host naming difference cannot drop the whole mode update.
+        const char* widthKey = firstPresentKey(kvp, {kPixelWidthKey, kWidthKey});
+        const char* heightKey = firstPresentKey(kvp, {kPixelHeightKey, kHeightKey});
+        const char* frameRateKey =
+            firstPresentKey(kvp, {kFrameRateInHzKey, kFrameRateKey, kFpsKey});
+        const char* interlacedKey =
+            firstPresentKey(kvp, {kInterlacedKey, kIsInterlacedKey});
+
+        if (widthKey == nullptr || heightKey == nullptr || frameRateKey == nullptr)
+        {
+            LOGF_WARN("%s setVideoMode missing video-mode parameter "
+                      "(hasWidth=%d hasHeight=%d hasFrameRate=%d)",
+                      kLogPrefix,
+                      static_cast<int>(widthKey != nullptr),
+                      static_cast<int>(heightKey != nullptr),
+                      static_cast<int>(frameRateKey != nullptr));
+            return;
+        }
+
+        // An omitted interlaced flag denotes a progressive mode.
+        const bool interlaced =
+            (interlacedKey != nullptr) ? ut_kvp_getBoolField(kvp, interlacedKey) : false;
+
+        VideoResolution resolution{};
+        if (!vcomponent::compositeinput::utility::makeVideoResolution(
+                static_cast<int32_t>(ut_kvp_getUInt32Field(kvp, widthKey)),
+                static_cast<int32_t>(ut_kvp_getUInt32Field(kvp, heightKey)),
+                interlaced,
+                ut_kvp_getFloatField(kvp, frameRateKey),
+                &resolution))
+        {
+            LOGF_WARN("%s setVideoMode has invalid video-mode parameters", kLogPrefix);
+            return;
+        }
+
+        android::sp<ICompositeInputControllerListener> controllerListener;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+
+            // A decoded video mode can only be produced from a locked input, so
+            // the cached status reports a STABLE signal alongside the mode.
+            m_cachedStatus.detectedResolution = resolution;
+            m_cachedStatus.signalStatus = SignalStatus::STABLE;
+
+            controllerListener = m_controllerListener;
+
+            const bool publishTelemetry = (m_state == State::STARTING || m_state == State::STARTED);
+            if (publishTelemetry)
+            {
+                m_cachedProperties[static_cast<int32_t>(PortProperty::SIGNAL_STRENGTH)] =
+                    makeInt64(signalStrengthDbmFor(SignalStatus::STABLE));
+                m_cachedProperties[static_cast<int32_t>(PortProperty::SIGNAL_QUALITY)] =
+                    makeInt32(signalQualityFor(SignalStatus::STABLE));
+            }
+        }
+
+        LOGF_INFO("%s UT VIDEO_MODE port=%d %dx%d%s @ %.3f Hz",
+                  kLogPrefix,
+                  m_portId,
+                  static_cast<int>(resolution.pixelWidth),
+                  static_cast<int>(resolution.pixelHeight),
+                  interlaced ? "i" : "p",
+                  static_cast<double>(resolution.frameRateInHz));
+
+        if (controllerListener != nullptr)
+        {
+            CompositeInputControllerListener::onVideoModeChanged(
+                controllerListener, resolution);
+        }
+        return;
+    }
+
+    if (utCommand == UtCommand::CLEAR_VIDEO_MODE)
+    {
+        LOGF_INFO("%s UT CLEAR_VIDEO_MODE port=%d", kLogPrefix, m_portId);
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_cachedStatus.detectedResolution = std::nullopt;
+        return;
+    }
+
+    if (utCommand == UtCommand::SET_PROPERTY)
+    {
+        if (!ut_kvp_fieldPresent(kvp, kPropertyKey) ||
+            (!ut_kvp_fieldPresent(kvp, kIntValueKey) &&
+             !ut_kvp_fieldPresent(kvp, kLongValueKey)))
+        {
+            LOGF_WARN("%s setProperty missing key or value parameter", kLogPrefix);
+            return;
+        }
+
+        char propertyToken[128] = {0};
+        ut_kvp_getStringField(kvp, kPropertyKey, propertyToken, sizeof(propertyToken));
+
+        PortProperty property{};
+        if (!vcomponent::compositeinput::utility::portPropertyFromString(
+                propertyToken, &property))
+        {
+            LOGF_WARN("%s setProperty has invalid key=%s", kLogPrefix, propertyToken);
+            return;
+        }
+
+        const auto cacheKey = static_cast<int32_t>(property);
+        const ::com::rdk::hal::PropertyValue value =
+            ut_kvp_fieldPresent(kvp, kLongValueKey)
+                // Convert its 64-bit result to the signed AIDL longValue type.
+                ? makeInt64(static_cast<int64_t>(ut_kvp_getUInt64Field(kvp, kLongValueKey)))
+                : makeInt32(static_cast<int32_t>(
+                      ut_kvp_getUInt32Field(kvp, kIntValueKey)));
+
+        std::vector<android::sp<ICompositeInputEventListener>> eventListeners;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_cachedProperties[cacheKey] = value;
+            eventListeners = m_eventListeners;
+        }
+
+        LOGF_INFO("%s UT SET_PROPERTY port=%d property=%s",
+                  kLogPrefix,
+                  m_portId,
+                  propertyToken);
+
+        CompositeInputEventListener::onPropertyChanged(
+            eventListeners, property, value);
+        return;
+    }
+
+    LOGF_WARN("%s ignoring unsupported UT command=%s",
+              kLogPrefix,
+              rawCommandToken.c_str());
+
 }
 
 android::binder::Status CompositeInputPort::getId(int32_t* _aidl_return)
