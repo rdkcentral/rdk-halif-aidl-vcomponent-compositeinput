@@ -1,4 +1,17 @@
 Contributing
-============
+If you wish to make code contributions to this project, the source is hosted at github.com/rdkcentral.
+You can submit your changes for review via that site by raising an issue on GitHub (https://github.com/rdkcentral/xxxx/issues) and following the sequence below.
 
-If you would like to contribute code to this project you can do so through GitHub by forking the repository and sending a pull request. Before RDK accepts your code into the project you must sign the RDK Contributor License Agreement (CLA).
+create a branch with a name follow the guidelines gh(x)_(synopsis)
+
+where x is the ticket number
+
+where synopsis is a short synopsis for the reason for the branch.
+
+create a pull request (https://github.com/rdkcentral/xxxx/compare) when the code changes are ready for review.
+
+The team will review, and if accepted your changes will be merged to the mainline.
+
+In order to contribute code, first-time users are requested to agree to the license.
+
+where xxxx is your module name
