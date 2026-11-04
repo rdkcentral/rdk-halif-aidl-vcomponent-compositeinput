@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.16)
 
 project(CompositeInput LANGUAGES CXX)
 
@@ -68,8 +68,12 @@ endif()
 # Optional version (fallback)
 # ----------------------
 if(NOT DEFINED VCOMPONENT_VERSION)
-  set(VCOMPONENT_VERSION "0.2.0.0")
+  set(VCOMPONENT_VERSION "0.3.0.0")
   message(WARNING "VCOMPONENT_VERSION not set. Using default: ${VCOMPONENT_VERSION}")
+endif()
+# Common has its own snapshot selector, as in the HDMIInput build.
+if(NOT DEFINED VCOMPONENT_INCLUDE_VERSION)
+  set(VCOMPONENT_INCLUDE_VERSION "0.3.0.0")
 endif()
 
 # ----------------------
@@ -87,11 +91,11 @@ endif()
 # Include paths
 # ----------------------
 if(USE_SYSROOT)
-    set(AIDL_INCLUDE_DIR "${CMAKE_SYSROOT}/usr/include/hal/h")
+    set(AIDL_INCLUDE_DIR "${CMAKE_SYSROOT}/usr/include/vendor/compositeinput/${VCOMPONENT_VERSION}/include")
+    if(NOT DEFINED COMMON_INCLUDE_DIR)
+        set(COMMON_INCLUDE_DIR "${CMAKE_SYSROOT}/usr/include/vendor/common/${VCOMPONENT_INCLUDE_VERSION}/include")
+    endif()
     set(EXTRA_INCLUDE    "${CMAKE_SYSROOT}/usr/include")
-    set(EXTRA_INCLUDE    
-    "${CMAKE_SYSROOT}/usr/include/vendor/compositeinput/${VCOMPONENT_VERSION}/include" 
-    "${CMAKE_SYSROOT}/usr/include/vendor/common/${VCOMPONENT_INCLUDE_VERSION}/include")
 else()
     if(NOT DEFINED HALIF_INCLUDE_DIR OR
        NOT DEFINED BINDER_SDK_DIR OR
@@ -157,45 +161,37 @@ add_custom_target(copy_vcomponent_configs ALL
 # ----------------------
 if(USE_SYSROOT)
     find_library(COMPOSITEINPUT_HAL_LIB
-    NAMES 
-        compositeinput-v${VCOMPONENT_VERSION}-cpp
-        compositeinput-vcurrent-cpp
-        compositeinput
-        hal_aidl
-    HINTS
-        "${CMAKE_SYSROOT}/usr/lib/vendor/rdk-halif-aidl"
-        
+        NAMES compositeinput-v${VCOMPONENT_VERSION}-cpp
+        HINTS "${CMAKE_SYSROOT}/usr/lib/vendor/rdk-halif-aidl"
+    )
+    find_library(COMMON_AIDL_LIB
+        NAMES common-v${VCOMPONENT_INCLUDE_VERSION}-cpp
+        HINTS "${CMAKE_SYSROOT}/usr/lib/vendor/rdk-halif-aidl"
     )
     if(NOT COMPOSITEINPUT_HAL_LIB)
-        message(FATAL_ERROR "CompositeInput HALIF lib not found in sysroot")
+        message(FATAL_ERROR "CompositeInput HALIF ${VCOMPONENT_VERSION} lib not found in sysroot")
     endif()
 else()
     if(NOT DEFINED HALIF_LIB_DIR)
         message(FATAL_ERROR "HALIF_LIB_DIR not set")
     endif()
 
-    file(GLOB COMPOSITEINPUT_HAL_LIB
-        "${HALIF_LIB_DIR}/libcompositeinput*-cpp.so"
-        "${HALIF_LIB_DIR}/libcompositeinput*.so"
-        "${HALIF_LIB_DIR}/*compositeinput*-cpp.so"
-        "${HALIF_LIB_DIR}/*compositeinput*.so"
-    )
-    list(LENGTH COMPOSITEINPUT_HAL_LIB _HAL_LIB_COUNT)
-    if(_HAL_LIB_COUNT EQUAL 0)
-        message(FATAL_ERROR "CompositeInput HALIF lib not found in ${HALIF_LIB_DIR}")
-    endif()
-
-    list(SORT COMPOSITEINPUT_HAL_LIB)
-    math(EXPR _HAL_LIB_LAST "${_HAL_LIB_COUNT} - 1")
-    list(GET COMPOSITEINPUT_HAL_LIB ${_HAL_LIB_LAST} COMPOSITEINPUT_HAL_LIB)
+    set(COMPOSITEINPUT_HAL_LIB "${HALIF_LIB_DIR}/libcompositeinput-v${VCOMPONENT_VERSION}-cpp.so")
+    set(COMMON_AIDL_LIB "${HALIF_LIB_DIR}/libcommon-v${VCOMPONENT_INCLUDE_VERSION}-cpp.so")
 
     if(NOT EXISTS "${COMPOSITEINPUT_HAL_LIB}")
-        message(FATAL_ERROR "CompositeInput HALIF lib not found in ${HALIF_LIB_DIR}")
+        message(FATAL_ERROR "CompositeInput HALIF lib not found: ${COMPOSITEINPUT_HAL_LIB}")
     endif()
 endif()
 
 add_library(compositeinput_hal SHARED IMPORTED)
 set_target_properties(compositeinput_hal PROPERTIES IMPORTED_LOCATION "${COMPOSITEINPUT_HAL_LIB}")
+
+if(NOT EXISTS "${COMMON_AIDL_LIB}")
+    message(FATAL_ERROR "Common AIDL lib not found: ${COMMON_AIDL_LIB}")
+endif()
+add_library(common_aidl SHARED IMPORTED)
+set_target_properties(common_aidl PROPERTIES IMPORTED_LOCATION "${COMMON_AIDL_LIB}")
 
 # ----------------------
 # UT Control
@@ -257,8 +253,8 @@ target_include_directories(compositeinput_core PUBLIC
     ${UTCONTROL_INCLUDE_DIR}
     ${UTFRAMEWORK_INCLUDE_DIR}
     ${GTEST_INCLUDE_DIR}
-    ${EXTRA_INCLUDE}
     ${COMMON_INCLUDE_DIR}
+    ${EXTRA_INCLUDE}
 )
 
 target_include_directories(compositeinput_core PRIVATE
@@ -267,6 +263,10 @@ target_include_directories(compositeinput_core PRIVATE
 
 target_link_libraries(compositeinput_core PUBLIC
     compositeinput_hal
+    common_aidl
+    binder
+    utils
+    log
     ut_control
 )
 
@@ -291,8 +291,8 @@ target_include_directories(RDKCompositeInputService PRIVATE
     ${UTCONTROL_INCLUDE_DIR}
     ${UTFRAMEWORK_INCLUDE_DIR}
     ${GTEST_INCLUDE_DIR}
-    ${EXTRA_INCLUDE}
     ${COMMON_INCLUDE_DIR}
+    ${EXTRA_INCLUDE}
 )
 
 target_link_libraries(RDKCompositeInputService PRIVATE

@@ -29,12 +29,12 @@ RESET='\033[0m'
 
 declare -r TOP=`dirname $(realpath $0)`
 declare -r HALIF_VERSION=current
-RDK_HALIF_AIDL_VERSION="${RDK_HALIF_AIDL_VERSION:-"develop"}"
+RDK_HALIF_AIDL_VERSION="${RDK_HALIF_AIDL_VERSION:-0.23.0}"
 
 VCOMPONENT="${VCOMPONENT:-compositeinput}"
 
-VCOMPONENT_VERSION="${VCOMPONENT_VERSION:-0.2.0.0}"
-VCOMPONENT_INCLUDE_VERSION="${VCOMPONENT_INCLUDE_VERSION:-0.2.0.0}"
+VCOMPONENT_VERSION="${VCOMPONENT_VERSION:-0.3.0.0}"
+VCOMPONENT_INCLUDE_VERSION="${VCOMPONENT_INCLUDE_VERSION:-0.3.0.0}"
 
 declare -A HALIF_COMPONENTS=(
   [compositeinput]="current"
@@ -85,20 +85,22 @@ fi
 ###############################################################################
 # Function to checkout the halif aidl repository and generate the HAL interfaces
 ###############################################################################
+# PUBLIC_INTERFACE
+# Build Binder and the selected common/component snapshots; exit on failure.
 generate_hal_interfaces()
 {
     # Clone the repository if not already present
     if [ ! -d "$RDK_HAL_DIR" ]; then
         echo "Checking out version: " $RDK_HALIF_AIDL_VERSION
-        git clone -b $RDK_HALIF_AIDL_VERSION 'https://github.com/rdkcentral/rdk-halif-aidl.git' $RDK_HAL_DIR
+        git clone -b "$RDK_HALIF_AIDL_VERSION" 'https://github.com/rdkcentral/rdk-halif-aidl.git' "$RDK_HAL_DIR" || exit 1
     fi
 
-    pushd "$RDK_HAL_DIR" >/dev/null
+    pushd "$RDK_HAL_DIR" >/dev/null || exit 1
 
     ./build_binder.sh || { echo -e "${BOLD}* ${RED}Failed to build binder tools. Exiting.${RESET}"; exit 1; }
 
     # CompositeInput depends on HALIF 'common' (PropertyValue.h)
-    ./build_modules.sh "common" --version "${VCOMPONENT_VERSION}" || {
+    ./build_modules.sh "common" --version "${VCOMPONENT_INCLUDE_VERSION}" || {
         echo -e "${BOLD}* ${RED}Failed to build HALIF modules (common). Exiting.${RESET}"
         exit 1
     }
@@ -113,9 +115,7 @@ generate_hal_interfaces()
     fi
 
     # ---- pass include path only to this command invocation ----
-    COMMON_VER_INC="${RDK_HAL_DIR}/common/${VCOMPONENT_VERSION}/include"
-
-    
+    COMMON_VER_INC="${RDK_HAL_DIR}/common/${VCOMPONENT_INCLUDE_VERSION}/include"
 
     CFLAGS="-I${COMMON_VER_INC} ${CFLAGS:-}" \
     CXXFLAGS="-I${COMMON_VER_INC} ${CXXFLAGS:-}" \
@@ -133,11 +133,12 @@ generate_hal_interfaces()
 ###############################################################################
 # Function to set path for HALIF + Binder SDK environment variables
 ###############################################################################
+# PUBLIC_INTERFACE
+# Resolve overridable paths for the selected HAL snapshot and Binder SDK.
 halif_binder_env()
 {
     AIDL_SRC_VERSION="${AIDL_SRC_VERSION:-${VCOMPONENT_VERSION}}"
     VCOMPONENT_HALIF_INCLUDE_DIR="${VCOMPONENT_HALIF_INCLUDE_DIR:-${RDK_HAL_DIR}/${VCOMPONENT}/${VCOMPONENT_VERSION}/include}"
-    
 
     AIDL_BIN="${AIDL_BIN:-${RDK_HAL_DIR}/out/target/bin/aidl}"
     AIDL_CPP_BIN="${AIDL_CPP_BIN:-${RDK_HAL_DIR}/out/target/bin/aidl-cpp}"
@@ -157,7 +158,7 @@ halif_binder_env()
         *) PATH="${BINDER_SDK_DIR}/bin:${PATH}" ;;
     esac
 
-    LD_LIBRARY_PATH="${BINDER_SDK_DIR}/lib:${HALIF_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    LD_LIBRARY_PATH="${BINDER_SDK_DIR}/lib/binder:${HALIF_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 
     echo -e "${BOLD}${CYAN}Derived HALIF/Binder environment:${RESET}"
     echo -e "${BOLD}${GREEN}  RDK_HAL_DIR=${RESET}${YELLOW}${RDK_HAL_DIR}${RESET}"
@@ -169,6 +170,8 @@ halif_binder_env()
 ###############################################################################
 # Function to clone and build the ut-core repository
 ###############################################################################
+# PUBLIC_INTERFACE
+# Build the selected UT-Core tag and stage UT-Control; exit on build failure.
 build_ut_core()
 {
     if [ ! -d ${UT_CORE_DIR} ]; then
@@ -205,25 +208,29 @@ build_ut_core()
 ###############################################################################
 # Function to install linux-binder service manager, headers, and libraries
 ###############################################################################
+# PUBLIC_INTERFACE
+# Stage the resolved Binder SDK and selected HAL libraries; return failure on error.
 install_linux_binder()
 {
-     echo "LINUX_BINDER_OUT_DIR=${LINUX_BINDER_OUT_DIR}"
+    echo "BINDER_SDK_DIR=${BINDER_SDK_DIR}"
 
-    popd >/dev/null
+    install -d "${BUILD_INSTALL_PREFIX}/bin" \
+               "${BUILD_INSTALL_PREFIX}/lib" \
+               "${BUILD_INSTALL_PREFIX}/include" || return $?
 
-    install -d ${BUILD_INSTALL_PREFIX}/bin \
-               ${BUILD_INSTALL_PREFIX}/lib/ \
-               ${BUILD_INSTALL_PREFIX}/include
-
-    install -t ${BUILD_INSTALL_PREFIX}/bin ${LINUX_BINDER_OUT_DIR}/bin/*
-    install -t ${BUILD_INSTALL_PREFIX}/lib ${LINUX_BINDER_OUT_DIR}/lib/*.so
-    install -t ${BUILD_INSTALL_PREFIX}/lib ${BINDER_SDK_DIR}/lib/rdk-halif-aidl/*
-    cp -apr ${BINDER_SDK_INCLUDE_DIR}/* ${BUILD_INSTALL_PREFIX}/include/
+    install -t "${BUILD_INSTALL_PREFIX}/bin" "${BINDER_SDK_DIR}"/bin/* || return $?
+    install -t "${BUILD_INSTALL_PREFIX}/lib" "${BINDER_SDK_DIR}"/lib/binder/*.so || return $?
+    install -t "${BUILD_INSTALL_PREFIX}/lib" \
+        "${HALIF_LIB_DIR}/libcompositeinput-v${VCOMPONENT_VERSION}-cpp.so" \
+        "${HALIF_LIB_DIR}/libcommon-v${VCOMPONENT_INCLUDE_VERSION}-cpp.so" || return $?
+    cp -apr "${BINDER_SDK_INCLUDE_DIR}/." "${BUILD_INSTALL_PREFIX}/include/" || return $?
 }
 
 ###############################################################################
 # Function to copy common directory from HALIF repo (versioned include retained)
 ###############################################################################
+# PUBLIC_INTERFACE
+# Stage headers from the selected common snapshot; exit if PropertyValue.h is absent.
 prepare_common_dir()
 {
     SRC_COMMON_DIR="${RDK_HAL_DIR}/common"
@@ -240,7 +247,7 @@ prepare_common_dir()
     cp -r "${SRC_COMMON_DIR}" "${DEST_COMMON_DIR}" || { echo -e "${RED}Failed to copy common directory!${RESET}"; exit 1; }
 
     # Versioned include root (needed for PropertyValue.h)
-    COMMON_INCLUDE_DIR="${DEST_COMMON_DIR}/${VCOMPONENT_VERSION}/include"
+    COMMON_INCLUDE_DIR="${DEST_COMMON_DIR}/${VCOMPONENT_INCLUDE_VERSION}/include"
     echo -e "${GREEN}COMMON_INCLUDE_DIR=${COMMON_INCLUDE_DIR}${RESET}"
 
     if [ ! -f "${COMMON_INCLUDE_DIR}/com/rdk/hal/PropertyValue.h" ]; then
@@ -251,12 +258,14 @@ prepare_common_dir()
     # Stage into HALIF global include root so HALIF module build can include <com/...>
     HALIF_GLOBAL_INCLUDE_DIR="${RDK_HAL_DIR}/out/build/include"
     mkdir -p "${HALIF_GLOBAL_INCLUDE_DIR}" || exit 1
-    cp -a "${SRC_COMMON_DIR}/${VCOMPONENT_VERSION}/include/com" "${HALIF_GLOBAL_INCLUDE_DIR}/" || exit 1
+    cp -a "${SRC_COMMON_DIR}/${VCOMPONENT_INCLUDE_VERSION}/include/com" "${HALIF_GLOBAL_INCLUDE_DIR}/" || exit 1
 }
 
 ###############################################################################
 # Function to build CompositeInput component
 ###############################################################################
+# PUBLIC_INTERFACE
+# Configure, build, install and stage CompositeInput; return the failing command's status.
 build_CompositeInput()
 {
     cmake -S . -B build \
@@ -271,6 +280,7 @@ build_CompositeInput()
         -DHALIF_COMMON_INCLUDE_DIR="${HALIF_COMMON_INCLUDE_DIR}" \
         -DCOMMON_INCLUDE_DIR="${COMMON_INCLUDE_DIR}" \
         -DVCOMPONENT_VERSION="${VCOMPONENT_VERSION}" \
+        -DVCOMPONENT_INCLUDE_VERSION="${VCOMPONENT_INCLUDE_VERSION}" \
         "${EXTRA_CMAKE_ARGS[@]}"
 
     local cfg_rc=$?
@@ -282,23 +292,17 @@ build_CompositeInput()
     cmake --build build -j || return $?
     cmake --install build --prefix ./build/out/ || return $?
 
-    cp -f "${HALIF_LIB_DIR}"/libcompositeinput*-cpp.so "${TOP_BUILD_DIR}/" 2>/dev/null || \
-    cp -f "${HALIF_LIB_DIR}"/libcompositeinput*.so "${TOP_BUILD_DIR}/" 2>/dev/null || \
-    echo -e "${YELLOW}Warning: compositeinput shared library not found under ${HALIF_LIB_DIR}${RESET}"
-
-    # libcompositeinput-v<ver>-cpp.so has a direct NEEDED dependency on
-    # libcommon-v<ver>-cpp.so (HALIF 'common' 0.2.0.0), which hdmioutput does
-    # not have. Copy it beside the service binary as well, otherwise the loader
-    # reports "libcommon-v0.2.0.0-cpp.so: cannot open shared object file" even
-    # after exporting LD_LIBRARY_PATH.
-    cp -f "${HALIF_LIB_DIR}"/libcommon*-cpp.so "${TOP_BUILD_DIR}/" 2>/dev/null || \
-    cp -f "${HALIF_LIB_DIR}"/libcommon*.so "${TOP_BUILD_DIR}/" 2>/dev/null || \
-    echo -e "${YELLOW}Warning: common shared library not found under ${HALIF_LIB_DIR}${RESET}"
+    # Ship the same frozen libraries CMake linked, including the common dependency.
+    cp -f "${HALIF_LIB_DIR}/libcompositeinput-v${VCOMPONENT_VERSION}-cpp.so" \
+        "${HALIF_LIB_DIR}/libcommon-v${VCOMPONENT_INCLUDE_VERSION}-cpp.so" \
+        "${TOP_BUILD_DIR}/" || return $?
 }
 
 ###############################################################################
 # Function to clean the test build directory
 ###############################################################################
+# PUBLIC_INTERFACE
+# Remove component build output and clean legacy AIDL output when present.
 clean_test()
 {
     echo -e "${BOLD}removing *.o${RESET}"
@@ -310,6 +314,8 @@ clean_test()
 ###############################################################################
 # Function to clean the test build directory
 ###############################################################################
+# PUBLIC_INTERFACE
+# Remove build output and the configured HALIF and UT-Core checkout directories.
 dist_clean_test()
 {
     clean_test
@@ -321,16 +327,18 @@ dist_clean_test()
 ###############################################################################
 # help function to display usage information
 ###############################################################################
+# PUBLIC_INTERFACE
+# Print the supported build, cleanup and help commands.
 help()
 {
     echo -e "${BOLD}${CYAN}Usage:${RESET}"
 
-    echo -e "${BOLD}╔══════════════════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}╔══════════════════════════════════════════════════════════════════════════════════════════════════╗${RESET}"
     echo -e "${BOLD}* ${GREEN}$0 TARGET=<target>${RESET} ${YELLOW}- Builds the component for specified target (arm, linux)${RESET} ${BOLD}*${RESET}"
     echo -e "${BOLD}* ${GREEN}$0 clean${RESET}           ${YELLOW}- Cleans the build folder${RESET}                           ${BOLD}*${RESET}"
     echo -e "${BOLD}* ${GREEN}$0 dist_clean${RESET}      ${YELLOW}- Deletes all build and checkout folders${RESET}            ${BOLD}*${RESET}"
     echo -e "${BOLD}* ${GREEN}$0 help/-h/--help${RESET}  ${YELLOW}- Prints this message${RESET}                               ${BOLD}*${RESET}"
-    echo -e "${BOLD}╚══════════════════════════════════════════════════════════════════════════════╝${RESET}"
+    echo -e "${BOLD}╚══════════════════════════════════════════════════════════════════════════════════════════════════╝${RESET}"
 }
 
 echo -e "${BOLD}${GREEN}Repo Branch            : ${RESET}${YELLOW}$(git rev-parse --abbrev-ref HEAD)${RESET}"
@@ -349,13 +357,10 @@ elif [ "$1" == "dist_clean" ]; then
 elif [ "$1" == "help" ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
     help
 elif [[ "$1" == [Tt]arget=* ]]; then
-    generate_hal_interfaces
-    # install_linux_binder() begins with popd; recreate the expected directory stack
-    # entry here so popd has a matching pushd to consume.
-    pushd "${RDK_HAL_DIR}" >/dev/null
-    install_linux_binder
-    build_ut_core
-    build_CompositeInput
+    generate_hal_interfaces || exit $?
+    install_linux_binder || exit $?
+    build_ut_core || exit $?
+    build_CompositeInput || exit $?
     echo -e "${BOLD}╔══════════════════════════════╗${RESET}"
     echo -e "${BOLD}* ${GREEN}Build Successful${RESET}        ${BOLD}*${RESET}"
     echo -e "${BOLD}╚══════════════════════════════╝${RESET}"
